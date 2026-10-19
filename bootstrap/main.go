@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ const (
 	pythonVersion = "3.13.9"
 	goVersion     = "1.27.2"
 	dotnetVersion = "10.0.100"
+	maxBuildLogs  = 10
 )
 
 type layout struct {
@@ -68,24 +70,38 @@ func main() {
 
 func runBootstrap(args []string) int {
 	var capture *buildLog
-	if len(args) > 0 && args[0] == "build" {
+	commandName := ""
+	if len(args) > 0 {
+		switch args[0] {
+		case "tools", "build", "clean", "distclean":
+			commandName = args[0]
+		}
+	}
+	if commandName != "" {
 		paths, err := projectLayout()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "hpe-bootstrap:", err)
 			return 1
 		}
-		logDir := filepath.Join(paths.build, "logs")
-		if configured := os.Getenv("HPE_LOG_DIR"); configured != "" {
-			logDir = envPath("HPE_LOG_DIR", logDir)
+		if err := prepareManagedRoots(paths); err != nil {
+			fmt.Fprintln(os.Stderr, "hpe-bootstrap:", err)
+			return 1
 		}
+		logDir := buildLogDirectory(paths)
 		capture, err = startBuildLog(logDir)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "hpe-bootstrap: cannot create build log:", err)
 			return 1
 		}
 		fmt.Fprintf(os.Stderr, "Build log: %s\n", capture.path)
-		fmt.Fprintf(os.Stdout, "HPE build started at %s (%s/%s)\n", time.Now().Format(time.RFC3339), runtime.GOOS, runtime.GOARCH)
-		fmt.Fprintf(os.Stdout, "Working directory: %s\nCommand: %s\n\n", currentDirectory(), strings.Join(append([]string{"build"}, args[1:]...), " "))
+		fmt.Fprintf(os.Stdout, "HPE %s started at %s (%s/%s)\n", commandName, time.Now().Format(time.RFC3339), runtime.GOOS, runtime.GOARCH)
+		fmt.Fprintf(os.Stdout, "Working directory: %q\nProject root: %q\nBuild root: %q\nToolchain root: %q\nCommand: %s\n\n",
+			currentDirectory(), paths.root, paths.build, paths.toolchain, formatCommand("hpe-bootstrap", args))
+		if err := pruneBuildLogs(filepath.Dir(capture.path), maxBuildLogs); err != nil {
+			fmt.Fprintf(os.Stderr, "Build log retention failed: %v\n", err)
+			_ = capture.Close()
+			return 1
+		}
 	}
 
 	err := run(args)
@@ -99,13 +115,160 @@ func runBootstrap(args []string) int {
 		if code != 0 {
 			status = "failed"
 		}
-		fmt.Fprintf(os.Stdout, "\nHPE build %s at %s\nBuild log saved to: %s\n", status, time.Now().Format(time.RFC3339), capture.path)
+		fmt.Fprintf(os.Stdout, "\nHPE %s %s at %s\nBuild log saved to: %s\n", commandName, status, time.Now().Format(time.RFC3339), capture.path)
 		if closeErr := capture.Close(); closeErr != nil {
 			fmt.Fprintf(capture.consoleErr, "hpe-bootstrap: finalize build log: %v\n", closeErr)
 			code = 1
 		}
 	}
 	return code
+}
+
+func prepareManagedRoots(paths layout) error {
+	rootBuild := filepath.Join(paths.root, "build")
+	rootToolchain := filepath.Join(paths.root, "toolchain")
+	rootInstall := filepath.Join(paths.root, "install")
+	defaultInstall := filepath.Join(rootInstall, hostRuntimeID())
+	customInstall := envPath("HPE_INSTALL_ROOT", defaultInstall)
+	managedRoots := []string{paths.build, paths.toolchain, rootInstall}
+	if !samePath(customInstall, rootInstall) && !pathContains(rootInstall, customInstall) {
+		managedRoots = append(managedRoots, customInstall)
+	}
+	if err := validateDisjointGeneratedPaths(managedRoots...); err != nil {
+		return err
+	}
+	buildEntries := []string{"logs", "downloads", "tools", "projects", "ccache-build", "ccache-source", "ccache-cache", "vcpkg-root", "vcpkg-downloads", "host-tools", "manifests", "nuget-packages", "nuget-http-cache"}
+	if logEntry, inBuildRoot, err := buildLogRootEntry(paths); err != nil {
+		return err
+	} else if inBuildRoot && logEntry != "." {
+		buildEntries = append(buildEntries, logEntry)
+	}
+	if err := prepareManagedRoot(paths.root, paths.build, rootBuild, ".hpe-build-root", buildEntries); err != nil {
+		return err
+	}
+	if err := prepareManagedRoot(paths.root, paths.toolchain, rootToolchain, ".hpe-toolchain-root", []string{"go", "zig", "dotnet"}); err != nil {
+		return err
+	}
+	if samePath(customInstall, defaultInstall) || samePath(customInstall, rootInstall) || pathContains(rootInstall, customInstall) {
+		return nil
+	}
+	return prepareManagedRoot(paths.root, customInstall, defaultInstall, ".hpe-install-root",
+		[]string{"gui", "lib", "examples", "hpe-cli", "hpe-cli.exe", "hpe-gui", "hpe-gui.cmd", "hpe_core.dll", "hpe_gui_bridge.dll"})
+}
+
+func buildLogDirectory(paths layout) string {
+	return envPath("HPE_LOG_DIR", filepath.Join(paths.build, "logs"))
+}
+
+func buildLogRootEntry(paths layout) (string, bool, error) {
+	logDir, err := filepath.Abs(buildLogDirectory(paths))
+	if err != nil {
+		return "", false, err
+	}
+	buildRoot, err := filepath.Abs(paths.build)
+	if err != nil {
+		return "", false, err
+	}
+	relative, err := filepath.Rel(buildRoot, logDir)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return "", false, nil
+	}
+	if relative == "." {
+		return ".", true, nil
+	}
+	return strings.Split(relative, string(os.PathSeparator))[0], true, nil
+}
+
+func prepareManagedRoot(projectRoot, directory, defaultDirectory, markerName string, allowedEntries []string) error {
+	path, err := filepath.Abs(directory)
+	if err != nil {
+		return err
+	}
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to manage symlink project root %s", path)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if samePath(path, defaultDirectory) {
+		return nil
+	}
+	if err := validateGeneratedPath(projectRoot, path); err != nil {
+		return fmt.Errorf("unsafe custom project root: %w", err)
+	}
+	marker := filepath.Join(path, markerName)
+	expected := filepath.Clean(path) + "\nproject=" + filepath.Clean(projectRoot) + "\n"
+	if data, err := os.ReadFile(marker); err == nil {
+		if string(data) != expected {
+			return fmt.Errorf("custom project root marker does not match %s", path)
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	entries, err := os.ReadDir(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return err
+		}
+		entries = nil
+	} else if err != nil {
+		return err
+	}
+	allowed := make(map[string]bool, len(allowedEntries))
+	for _, entry := range allowedEntries {
+		allowed[entry] = true
+	}
+	for _, entry := range entries {
+		if markerName == ".hpe-build-root" && strings.HasPrefix(entry.Name(), "build-") && strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		if !allowed[entry.Name()] {
+			return fmt.Errorf("custom project root %s contains unrecognized entry %q; choose a dedicated empty HPE output directory", path, entry.Name())
+		}
+	}
+	if err := os.WriteFile(marker, []byte(expected), 0o644); err != nil {
+		return fmt.Errorf("mark project-owned directory %s: %w", path, err)
+	}
+	return nil
+}
+
+func pruneBuildLogs(directory string, keep int) error {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	type logEntry struct {
+		name    string
+		modTime time.Time
+	}
+	logs := make([]logEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "build-") || !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", entry.Name(), err)
+		}
+		if info.Mode().IsRegular() {
+			logs = append(logs, logEntry{name: entry.Name(), modTime: info.ModTime()})
+		}
+	}
+	sort.Slice(logs, func(i, j int) bool {
+		if logs[i].modTime.Equal(logs[j].modTime) {
+			return logs[i].name < logs[j].name
+		}
+		return logs[i].modTime.Before(logs[j].modTime)
+	})
+	for len(logs) > keep {
+		oldest := logs[0]
+		fmt.Printf("Removing oldest build log to retain the latest %d: %s\n", keep, oldest.name)
+		if err := os.Remove(filepath.Join(directory, oldest.name)); err != nil {
+			return fmt.Errorf("remove old build log %s: %w", oldest.name, err)
+		}
+		logs = logs[1:]
+	}
+	return nil
 }
 
 type buildLog struct {
@@ -193,50 +356,285 @@ func currentDirectory() string {
 	return directory
 }
 
+func formatCommand(name string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, strconv.Quote(name))
+	for _, arg := range args {
+		parts = append(parts, strconv.Quote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
 func run(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
-		fmt.Println("Usage: hpe-bootstrap <tools|build|help>")
+		fmt.Println("Usage: hpe-bootstrap <tools|build|clean|distclean|help>")
 		fmt.Println("  tools   Download and install pinned local compiler/build SDKs")
 		fmt.Println("  build   Build and install HPE for the current host")
+		fmt.Println("  clean   Remove intermediate outputs and installed programs, keeping downloads and caches")
+		fmt.Println("  distclean Remove all downloaded and generated build data, keeping the last 10 logs")
 		return nil
 	}
-	if args[0] != "tools" && args[0] != "build" {
+	if args[0] != "tools" && args[0] != "build" && args[0] != "clean" && args[0] != "distclean" {
 		return fmt.Errorf("unknown command %q (run hpe-bootstrap help)", args[0])
 	}
 	paths, err := projectLayout()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(paths.downloads, 0o755); err != nil {
+	switch args[0] {
+	case "build":
+		return buildProject(paths)
+	case "clean":
+		return cleanProject(paths)
+	case "distclean":
+		return distcleanProject(paths)
+	default:
+		return runStep("Prepare compiler SDKs and local build tools", func() error { return ensureTools(paths) })
+	}
+}
+
+func runStep(name string, action func() error) error {
+	started := time.Now()
+	fmt.Printf("\n=== %s ===\n", name)
+	if err := action(); err != nil {
+		fmt.Printf("=== FAILED: %s (%s): %v ===\n", name, time.Since(started).Round(time.Millisecond), err)
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	fmt.Printf("=== DONE: %s (%s) ===\n", name, time.Since(started).Round(time.Millisecond))
+	return nil
+}
+
+func cleanProject(paths layout) error {
+	return runStep("Clean intermediate build outputs and install packages", func() error {
+		rootInstall := filepath.Join(paths.root, "install")
+		customInstall := envPath("HPE_INSTALL_ROOT", rootInstall)
+		remove := []string{
+			filepath.Join(paths.build, "projects"),
+			filepath.Join(paths.build, "ccache-build"),
+			filepath.Join(paths.build, "host-tools", "build"),
+			filepath.Join(paths.build, "manifests"),
+			rootInstall,
+		}
+		rootDotnetBuild := filepath.Join(paths.root, "build", "dotnet")
+		if !samePath(rootDotnetBuild, paths.build) && !pathContains(rootDotnetBuild, paths.build) && !pathContains(paths.build, rootDotnetBuild) {
+			remove = append(remove, rootDotnetBuild)
+		}
+		if !samePath(customInstall, rootInstall) && !pathContains(rootInstall, customInstall) {
+			remove = append(remove, customInstall)
+		}
+		protected := []string{paths.build, paths.toolchain, rootInstall}
+		if !samePath(customInstall, rootInstall) && !pathContains(rootInstall, customInstall) {
+			protected = append(protected, customInstall)
+		}
+		if !samePath(rootDotnetBuild, paths.build) && !pathContains(rootDotnetBuild, paths.build) && !pathContains(paths.build, rootDotnetBuild) {
+			protected = append(protected, rootDotnetBuild)
+		}
+		if err := validateDisjointGeneratedPaths(protected...); err != nil {
+			return err
+		}
+		for _, target := range remove {
+			if err := validateGeneratedPath(paths.root, target); err != nil {
+				return err
+			}
+		}
+		for _, target := range remove {
+			if err := removeGeneratedPath(paths.root, target); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("Kept downloaded archives, compiler SDKs, dependency sources, installed build tools, ccache, package caches, and build logs.\n")
+		return nil
+	})
+}
+
+func distcleanProject(paths layout) error {
+	return runStep("Remove downloaded toolchains, dependencies, intermediate outputs, and installed programs", func() error {
+		rootInstall := filepath.Join(paths.root, "install")
+		customInstall := envPath("HPE_INSTALL_ROOT", rootInstall)
+		remove := []string{paths.toolchain, rootInstall}
+		if !samePath(customInstall, rootInstall) && !pathContains(rootInstall, customInstall) {
+			remove = append(remove, customInstall)
+		}
+		protected := []string{paths.build, paths.toolchain, rootInstall}
+		if !samePath(customInstall, rootInstall) && !pathContains(rootInstall, customInstall) {
+			protected = append(protected, customInstall)
+		}
+		rootDotnetBuild := filepath.Join(paths.root, "build", "dotnet")
+		if !samePath(rootDotnetBuild, paths.build) && !pathContains(rootDotnetBuild, paths.build) && !pathContains(paths.build, rootDotnetBuild) {
+			protected = append(protected, rootDotnetBuild)
+		}
+		if err := validateDisjointGeneratedPaths(protected...); err != nil {
+			return err
+		}
+		if err := validateGeneratedPath(paths.root, paths.build); err != nil {
+			return err
+		}
+		for _, target := range remove {
+			if err := validateGeneratedPath(paths.root, target); err != nil {
+				return err
+			}
+		}
+		rootDotnetBuild = filepath.Join(paths.root, "build", "dotnet")
+		if !samePath(rootDotnetBuild, paths.build) && !pathContains(rootDotnetBuild, paths.build) {
+			if err := removeGeneratedPath(paths.root, rootDotnetBuild); err != nil {
+				return err
+			}
+		}
+		for _, target := range []string{filepath.Join(paths.root, "out"), filepath.Join(paths.root, ".ccache")} {
+			managed := false
+			for _, root := range append(append([]string(nil), protected...), customInstall) {
+				if pathsOverlap(target, root) {
+					managed = true
+					break
+				}
+			}
+			if !managed {
+				if err := removeGeneratedPath(paths.root, target); err != nil {
+					return err
+				}
+			}
+		}
+		for _, target := range remove {
+			if err := removeGeneratedPath(paths.root, target); err != nil {
+				return err
+			}
+		}
+		buildInfo, err := os.Stat(paths.build)
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Printf("Build root already absent: %s\n", paths.build)
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !buildInfo.IsDir() {
+			return fmt.Errorf("build root is not a directory: %s", paths.build)
+		}
+		if err := validateGeneratedPath(paths.root, paths.build); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(paths.build)
+		if err != nil {
+			return err
+		}
+		logEntry, logDirInBuildRoot, err := buildLogRootEntry(paths)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if (entry.Name() == "logs" && entry.IsDir()) || (logDirInBuildRoot && logEntry != "." && entry.Name() == logEntry && entry.IsDir()) {
+				fmt.Printf("Keeping bounded build log history: %s\n", filepath.Join(paths.build, entry.Name()))
+				continue
+			}
+			if logDirInBuildRoot && logEntry == "." && !entry.IsDir() && strings.HasPrefix(entry.Name(), "build-") && strings.HasSuffix(entry.Name(), ".log") {
+				fmt.Printf("Keeping bounded build log: %s\n", filepath.Join(paths.build, entry.Name()))
+				continue
+			}
+			if entry.Name() == ".hpe-build-root" {
+				fmt.Printf("Keeping custom build-root ownership marker: %s\n", filepath.Join(paths.build, entry.Name()))
+				continue
+			}
+			if err := removeGeneratedPath(paths.root, filepath.Join(paths.build, entry.Name())); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("Distclean complete; all tool downloads and generated build data were removed.\n")
+		return nil
+	})
+}
+
+func removeGeneratedPath(projectRoot, target string) error {
+	if err := validateGeneratedPath(projectRoot, target); err != nil {
 		return err
 	}
-	if args[0] == "build" {
-		return buildProject(paths)
+	if _, err := os.Lstat(target); errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("Already clean: %s\n", target)
+		return nil
+	} else if err != nil {
+		return err
 	}
-	return ensureTools(paths)
+	fmt.Printf("Removing: %s\n", target)
+	return os.RemoveAll(target)
+}
+
+func validateGeneratedPath(projectRoot, target string) error {
+	root, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return err
+	}
+	path, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	volumeRoot := filepath.VolumeName(path) + string(os.PathSeparator)
+	if samePath(path, volumeRoot) || samePath(path, root) || pathContains(path, root) {
+		return fmt.Errorf("refusing to remove unsafe generated path %s", path)
+	}
+	return nil
+}
+
+func samePath(first, second string) bool {
+	first = filepath.Clean(first)
+	second = filepath.Clean(second)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(first, second)
+	}
+	return first == second
+}
+
+func pathContains(parent, child string) bool {
+	relative, err := filepath.Rel(parent, child)
+	return err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
+func validateDisjointGeneratedPaths(paths ...string) error {
+	for first := 0; first < len(paths); first++ {
+		left, err := filepath.Abs(paths[first])
+		if err != nil {
+			return err
+		}
+		for second := first + 1; second < len(paths); second++ {
+			right, err := filepath.Abs(paths[second])
+			if err != nil {
+				return err
+			}
+			if pathsOverlap(left, right) {
+				return fmt.Errorf("generated paths overlap and cannot be safely cleaned: %s and %s", left, right)
+			}
+		}
+	}
+	return nil
+}
+
+func pathsOverlap(first, second string) bool {
+	return samePath(first, second) || pathContains(first, second) || pathContains(second, first)
 }
 
 func ensureTools(paths layout) error {
 	if err := os.MkdirAll(paths.downloads, 0o755); err != nil {
 		return err
 	}
-	artifacts, err := pinnedArtifacts(paths)
-	if err != nil {
+	var artifacts []artifact
+	if err := runStep("Resolve pinned SDK and host tool checksums", func() error {
+		var err error
+		artifacts, err = pinnedArtifacts(paths)
+		return err
+	}); err != nil {
 		return err
 	}
 	for _, item := range artifacts {
 		if item.destination == "" {
 			continue
 		}
-		if err := installArtifact(item, paths.downloads); err != nil {
+		if err := runStep("Verify/download/install "+item.name, func() error { return installArtifact(item, paths.downloads) }); err != nil {
 			return fmt.Errorf("install %s: %w", item.name, err)
 		}
 	}
 	if runtime.GOOS == "linux" {
-		if err := installZigWrappers(paths); err != nil {
+		if err := runStep("Prepare project-local compiler and Git compatibility wrappers", func() error { return installZigWrappers(paths) }); err != nil {
 			return err
 		}
-		if err := ensureLinuxHostTools(paths, buildJobs()); err != nil {
+		if err := runStep("Build project-local Linux host tools", func() error { return ensureLinuxHostTools(paths, buildJobs()) }); err != nil {
 			return err
 		}
 	}
@@ -730,7 +1128,7 @@ func buildProject(paths layout) error {
 	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		return fmt.Errorf("building on %s is not supported", runtime.GOOS)
 	}
-	if err := ensureTools(paths); err != nil {
+	if err := runStep("Verify or download and install compiler SDKs and build tools", func() error { return ensureTools(paths) }); err != nil {
 		return err
 	}
 	cmake := filepath.Join(paths.tools, "cmake", "bin", "cmake")
@@ -743,15 +1141,21 @@ func buildProject(paths layout) error {
 		zig += ".exe"
 		dotnet += ".exe"
 	}
-	if err := installZigWrappers(paths); err != nil {
+	if err := runStep("Prepare project-local compiler and Git compatibility wrappers", func() error { return installZigWrappers(paths) }); err != nil {
 		return err
 	}
-	ccache, err := prepareCcache(paths, cmake, ninja, zig)
-	if err != nil {
+	var ccache string
+	if err := runStep("Prepare vcpkg dependency source and incremental ccache build", func() error {
+		var err error
+		ccache, err = prepareCcache(paths, cmake, ninja, zig)
+		return err
+	}); err != nil {
 		return err
 	}
 	jobs := buildJobs()
-	return configureBuildInstall(paths, cmake, ninja, zig, dotnet, ccache, jobs)
+	return runStep("Configure, incrementally compile, and install HPE", func() error {
+		return configureBuildInstall(paths, cmake, ninja, zig, dotnet, ccache, jobs)
+	})
 }
 
 func buildJobs() string {
@@ -791,28 +1195,32 @@ func installZigWrappers(paths layout) error {
 
 func prepareCcache(paths layout, cmake, ninja, zig string) (string, error) {
 	vcpkg := filepath.Join(paths.build, "vcpkg-root")
-	if err := ensurePinnedSource(paths, "https://codeload.github.com/microsoft/vcpkg/tar.gz/9e593bb18ea69cc5095e012465dcd675a822ed0d",
-		"e9255b62719c659f224fcc639b1bf4a6226e4996ad3fb006e18e1533cad77725", vcpkg); err != nil {
+	if err := runStep("Verify or restore pinned vcpkg source", func() error {
+		return ensurePinnedSource(paths, "https://codeload.github.com/microsoft/vcpkg/tar.gz/9e593bb18ea69cc5095e012465dcd675a822ed0d",
+			"e9255b62719c659f224fcc639b1bf4a6226e4996ad3fb006e18e1533cad77725", vcpkg)
+	}); err != nil {
 		return "", err
 	}
-	if err := bootstrapVcpkg(vcpkg); err != nil {
+	if err := runStep("Prepare the pinned vcpkg executable", func() error { return bootstrapVcpkg(vcpkg) }); err != nil {
 		return "", err
 	}
-	if err := prepareFilesystemRegistry(vcpkg); err != nil {
+	if err := runStep("Prepare offline filesystem package registry", func() error { return prepareFilesystemRegistry(vcpkg) }); err != nil {
 		return "", err
 	}
 	if runtime.GOOS == "linux" {
-		if err := patchVcpkgPython(vcpkg); err != nil {
+		if err := runStep("Configure vcpkg to use the bundled Python runtime", func() error { return patchVcpkgPython(vcpkg) }); err != nil {
 			return "", err
 		}
 	}
 
 	source := filepath.Join(paths.build, "ccache-source")
-	if err := ensurePinnedSource(paths, "https://codeload.github.com/ccache/ccache/tar.gz/ec510e9b0f333b8e97aee98108de3e0858340d59",
-		"87d3ecc8dea48ab4e311e4fd24d4b1413caa9bde0c90965e04d9f7660e5b3c9c", source); err != nil {
+	if err := runStep("Verify or restore pinned ccache source", func() error {
+		return ensurePinnedSource(paths, "https://codeload.github.com/ccache/ccache/tar.gz/ec510e9b0f333b8e97aee98108de3e0858340d59",
+			"87d3ecc8dea48ab4e311e4fd24d4b1413caa9bde0c90965e04d9f7660e5b3c9c", source)
+	}); err != nil {
 		return "", err
 	}
-	if err := patchCcache(source); err != nil {
+	if err := runStep("Apply local ccache portability patch", func() error { return patchCcache(source) }); err != nil {
 		return "", err
 	}
 	buildDir := filepath.Join(paths.build, "ccache-build")
@@ -822,7 +1230,14 @@ func prepareCcache(paths layout, cmake, ninja, zig string) (string, error) {
 		ccache += ".exe"
 	}
 	if executableExists(ccache) {
-		return ccache, nil
+		if output, err := exec.Command(ccache, "--version").CombinedOutput(); err == nil {
+			fmt.Printf("Reusing validated ccache at %s: %s\n", ccache, strings.TrimSpace(string(output)))
+			return ccache, nil
+		}
+		fmt.Printf("Installed ccache failed its version check; rebuilding: %s\n", ccache)
+		if err := os.Remove(ccache); err != nil {
+			return "", err
+		}
 	}
 	env := compilerEnvironment(paths, zig, "", "")
 	cc, cxx := wrapperPaths(paths)
@@ -833,13 +1248,15 @@ func prepareCcache(paths layout, cmake, ninja, zig string) (string, error) {
 		"-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DZSTD_FROM_INTERNET=ON", "-DHIREDIS_FROM_INTERNET=OFF",
 		"-DREDIS_STORAGE_BACKEND=OFF", "-DCCACHE_DEV_MODE=OFF", "-DBUILD_TESTING=OFF",
 		"-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_INSTALL_PREFIX=" + prefix}
-	if err := runCommand(paths.root, env, cmake, args...); err != nil {
+	if err := runStep("Configure ccache with the bundled Zig toolchain", func() error { return runCommand(paths.root, env, cmake, args...) }); err != nil {
 		return "", err
 	}
-	if err := runCommand(paths.root, env, cmake, "--build", buildDir, "--target", "ccache", "--parallel", buildJobs()); err != nil {
+	if err := runStep("Compile ccache", func() error {
+		return runCommand(paths.root, env, cmake, "--build", buildDir, "--target", "ccache", "--parallel", buildJobs(), "--verbose")
+	}); err != nil {
 		return "", err
 	}
-	if err := runCommand(paths.root, env, cmake, "--install", buildDir); err != nil {
+	if err := runStep("Install ccache into the local build tools", func() error { return runCommand(paths.root, env, cmake, "--install", buildDir) }); err != nil {
 		return "", err
 	}
 	return ccache, nil
@@ -847,9 +1264,13 @@ func prepareCcache(paths layout, cmake, ninja, zig string) (string, error) {
 
 func ensurePinnedSource(paths layout, url, digest, destination string) error {
 	marker := filepath.Join(destination, ".hpe-source-verified")
-	if _, err := os.Stat(marker); err == nil {
+	if data, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(data)) == digest {
+		fmt.Printf("Reusing verified source tree %s (SHA-256 %s)\n", destination, digest)
 		return nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
+	fmt.Printf("Source tree is missing or has a stale verification marker; restoring %s\n", destination)
 	if err := os.RemoveAll(destination); err != nil {
 		return err
 	}
@@ -881,16 +1302,11 @@ func bootstrapVcpkg(root string) error {
 		asset, digest = "vcpkg-glibc", "be59d1fdf3725d2fb4bd1c0b435266726aaff2f87cb2503b775f44fb9b392ab474e6370d7e90e9d07b2c584b7deacc0670f98b477905c2e0d5cba5e01cee93dc"
 	}
 	path := filepath.Join(root, name)
-	if executableExists(path) {
-		if runtime.GOOS != "windows" {
-			return os.Chmod(path, 0o755)
-		}
-		return nil
-	}
 	url := "https://github.com/microsoft/vcpkg-tool/releases/download/2026-07-27/" + asset
 	if err := downloadVerified(url, path, digest); err != nil {
 		return err
 	}
+	fmt.Printf("Verified the local vcpkg executable at %s\n", path)
 	if runtime.GOOS != "windows" {
 		return os.Chmod(path, 0o755)
 	}
@@ -1079,7 +1495,7 @@ func ensureLinuxHostTools(paths layout, jobs string) error {
 		if err := downloadVerified(pkg.url, archive, pkg.hash); err != nil {
 			return err
 		}
-		if err := extractHostTool(archive, filepath.Join(sources, pkg.name), pkg.format); err != nil {
+		if err := extractHostTool(archive, filepath.Join(sources, pkg.name), pkg.format, pkg.hash); err != nil {
 			return err
 		}
 		if err := rewriteInterpreterShebangs(filepath.Join(sources, pkg.name), prefix); err != nil {
@@ -1121,7 +1537,7 @@ func ensureLinuxHostTools(paths layout, jobs string) error {
 		if err := rewriteInterpreterShebangs(archiveBuild, prefix); err != nil {
 			return err
 		}
-		if err := runLocalMake(archiveBuild, hostToolEnvironment(paths, zig, prefix), prefix, localMake, "-j"+jobs); err != nil {
+		if err := runLocalMake(archiveBuild, hostToolEnvironment(paths, zig, prefix), prefix, localMake, "-j"+jobs, "V=1"); err != nil {
 			return err
 		}
 		if err := runLocalMake(archiveBuild, hostToolEnvironment(paths, zig, prefix), prefix, localMake, "install"); err != nil {
@@ -1157,7 +1573,7 @@ func ensureLinuxHostTools(paths layout, jobs string) error {
 		if err := rewriteInterpreterShebangs(buildDir, prefix); err != nil {
 			return err
 		}
-		if err := runLocalMake(buildDir, hostToolEnvironment(paths, zig, prefix), prefix, localMake, "-j"+jobs); err != nil {
+		if err := runLocalMake(buildDir, hostToolEnvironment(paths, zig, prefix), prefix, localMake, "-j"+jobs, "V=1"); err != nil {
 			return err
 		}
 		if err := runLocalMake(buildDir, hostToolEnvironment(paths, zig, prefix), prefix, localMake, "install"); err != nil {
@@ -1186,7 +1602,19 @@ func installLinuxBaseTools(prefix, downloads string) error {
 		return err
 	}
 	busybox := filepath.Join(bin, "busybox")
-	if !executableExists(busybox) {
+	busyboxValid := false
+	if executableExists(busybox) {
+		if output, err := exec.Command(busybox, "--list").Output(); err == nil && len(output) > 0 {
+			busyboxValid = true
+			fmt.Printf("Reusing validated static BusyBox from %s\n", busybox)
+		} else {
+			fmt.Printf("Static BusyBox failed its integrity check; restoring from the verified Debian package\n")
+			if err := os.Remove(busybox); err != nil {
+				return err
+			}
+		}
+	}
+	if !busyboxValid {
 		deb := filepath.Join(downloads, busyboxName)
 		url := "https://deb.debian.org/debian/pool/main/b/busybox/" + busyboxName
 		if err := downloadVerified(url, deb, busyboxHash); err != nil {
@@ -1225,7 +1653,19 @@ func installLinuxBaseTools(prefix, downloads string) error {
 	}
 	perlDir := filepath.Join(prefix, "perl")
 	perl := filepath.Join(perlDir, "bin", "perl")
-	if !executableExists(perl) {
+	perlValid := false
+	if executableExists(perl) {
+		if output, err := exec.Command(perl, "--version").CombinedOutput(); err == nil && bytes.Contains(output, []byte("Perl")) {
+			perlValid = true
+			fmt.Printf("Reusing validated relocatable Perl from %s\n", perl)
+		} else {
+			fmt.Printf("Relocatable Perl failed its version check; restoring from the verified archive\n")
+			if err := os.Remove(perl); err != nil {
+				return err
+			}
+		}
+	}
+	if !perlValid {
 		archiveName := "perl-linux-" + perlArch + ".tar.xz"
 		archive := filepath.Join(downloads, archiveName)
 		url := "https://github.com/skaji/relocatable-perl/releases/download/5.44.0.0/" + archiveName
@@ -1398,6 +1838,7 @@ func configureHostTool(paths layout, prefix, sources, builds, name, jobs string,
 		binary = "libtoolize"
 	}
 	if executableExists(filepath.Join(prefix, "bin", binary)) {
+		fmt.Printf("Reusing installed Linux host tool: %s\n", filepath.Join(prefix, "bin", binary))
 		return nil
 	}
 	buildDir := filepath.Join(builds, name)
@@ -1412,24 +1853,30 @@ func configureHostTool(paths layout, prefix, sources, builds, name, jobs string,
 	if name == "m4" {
 		args = append(args, "--with-syscmd-shell="+filepath.Join(prefix, "bin", "sh"))
 	}
-	if err := runLocalShell(buildDir, env, prefix, filepath.Join(sources, name, "configure"), args...); err != nil {
+	if err := runStep("Configure Linux host tool "+name, func() error {
+		return runLocalShell(buildDir, env, prefix, filepath.Join(sources, name, "configure"), args...)
+	}); err != nil {
 		return err
 	}
 	make := filepath.Join(prefix, "bin", "make")
 	if err := rewriteInterpreterShebangs(buildDir, prefix); err != nil {
 		return err
 	}
-	if err := runLocalMake(buildDir, env, prefix, make, "-j"+jobs); err != nil {
+	if err := runStep("Compile Linux host tool "+name, func() error { return runLocalMake(buildDir, env, prefix, make, "-j"+jobs, "V=1") }); err != nil {
 		return err
 	}
-	return runLocalMake(buildDir, env, prefix, make, "install")
+	return runStep("Install Linux host tool "+name, func() error { return runLocalMake(buildDir, env, prefix, make, "install") })
 }
 
-func extractHostTool(archive, destination, format string) error {
+func extractHostTool(archive, destination, format, digest string) error {
 	marker := filepath.Join(destination, ".hpe-extracted")
-	if _, err := os.Stat(marker); err == nil {
+	if data, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(data)) == digest {
+		fmt.Printf("Reusing extracted host tool source %s (SHA-256 %s)\n", destination, digest)
 		return nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
+	fmt.Printf("Extracting verified host tool source into %s\n", destination)
 	if err := os.RemoveAll(destination); err != nil {
 		return err
 	}
@@ -1448,13 +1895,20 @@ func extractHostTool(archive, destination, format string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(marker, []byte("ok\n"), 0o644)
+	return os.WriteFile(marker, []byte(digest+"\n"), 0o644)
 }
 
 func installCondaMake(paths layout, prefix, downloads string) error {
 	installed := filepath.Join(prefix, "bin", "make")
 	if executableExists(installed) {
-		return nil
+		if output, err := exec.Command(installed, "--version").CombinedOutput(); err == nil && bytes.Contains(output, []byte("GNU Make")) {
+			fmt.Printf("Reusing validated GNU Make from %s\n", installed)
+			return nil
+		}
+		fmt.Printf("GNU Make failed its version check; restoring from the verified package\n")
+		if err := os.Remove(installed); err != nil {
+			return err
+		}
 	}
 	arch, filename, digest := "64", "make-4.4.1-h1114479_4.conda", "d6a81e5c142d7be6a992f618097351e7996f81a6295045df3f9b4f498e1066a8"
 	if runtime.GOARCH == "arm64" {
@@ -1498,19 +1952,16 @@ func installCondaMake(paths layout, prefix, downloads string) error {
 }
 
 func configureBuildInstall(paths layout, cmake, ninja, zig, dotnet, ccache string, jobs string) error {
-	rid := "linux-x64"
-	if runtime.GOOS == "windows" {
-		rid = "win-x64"
-		if runtime.GOARCH == "arm64" {
-			rid = "win-arm64"
-		}
-	} else if runtime.GOARCH == "arm64" {
-		rid = "linux-arm64"
-	}
+	rid := hostRuntimeID()
 	installRoot := envPath("HPE_INSTALL_ROOT", filepath.Join(paths.root, "install", rid))
 	projectBuild := filepath.Join(paths.build, "projects", rid, "Release")
-	manifestDir, err := prepareVcpkgManifest(paths)
-	if err != nil {
+	fmt.Printf("Target runtime: %s; parallel jobs: %s; incremental CMake/Ninja directory: %s\n", rid, jobs, projectBuild)
+	var manifestDir string
+	if err := runStep("Prepare vcpkg manifest and local registry configuration", func() error {
+		var err error
+		manifestDir, err = prepareVcpkgManifest(paths)
+		return err
+	}); err != nil {
 		return err
 	}
 	cc, cxx := wrapperPaths(paths)
@@ -1552,40 +2003,60 @@ func configureBuildInstall(paths layout, cmake, ninja, zig, dotnet, ccache strin
 		"-DVCPKG_MANIFEST_DIR=" + manifestDir,
 		"-DVCPKG_INSTALLED_DIR=" + filepath.Join(projectBuild, "vcpkg_installed"),
 		"-DVCPKG_MANIFEST_INSTALL=ON", "-DVCPKG_MANIFEST_MODE=ON", "-DCMAKE_INSTALL_PREFIX=" + installRoot}
-	if err := runCommand(paths.root, env, cmake, args...); err != nil {
+	if err := runStep("Configure HPE and resolve pinned native dependencies", func() error { return runCommand(paths.root, env, cmake, args...) }); err != nil {
 		return err
 	}
-	if err := runCommand(paths.root, env, cmake, "--build", projectBuild, "--parallel", jobs); err != nil {
+	if err := runStep("Incrementally compile native simulator, CLI, and GUI bridge", func() error {
+		return runCommand(paths.root, env, cmake, "--build", projectBuild, "--parallel", jobs, "--verbose")
+	}); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(installRoot); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(installRoot, 0o755); err != nil {
-		return err
-	}
-	if err := runCommand(paths.root, env, cmake, "--install", projectBuild); err != nil {
+	if err := runStep("Refresh native install files", func() error {
+		if err := os.RemoveAll(installRoot); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(installRoot, 0o755); err != nil {
+			return err
+		}
+		return runCommand(paths.root, env, cmake, "--install", projectBuild)
+	}); err != nil {
 		return err
 	}
 	if runtime.GOOS == "linux" {
-		if err := bundleLinuxRuntime(zig, installRoot); err != nil {
+		if err := runStep("Bundle compiler runtime libraries for Linux", func() error { return bundleLinuxRuntime(zig, installRoot) }); err != nil {
 			return err
 		}
 	}
-	if err := publishGui(paths, dotnet, installRoot, rid, jobs); err != nil {
+	if err := runStep("Incrementally publish the self-contained desktop GUI", func() error {
+		return publishGui(paths, dotnet, installRoot, rid, jobs)
+	}); err != nil {
 		return err
 	}
-	if err := copyDirectory(filepath.Join(paths.root, "examples"), filepath.Join(installRoot, "gui", "examples")); err != nil {
-		return err
-	}
-	if err := copyDirectory(filepath.Join(paths.root, "assets", "fonts"), filepath.Join(installRoot, "lib", "fonts")); err != nil {
+	if err := runStep("Copy protocol examples and bundled fonts", func() error {
+		if err := copyDirectory(filepath.Join(paths.root, "examples"), filepath.Join(installRoot, "gui", "examples")); err != nil {
+			return err
+		}
+		return copyDirectory(filepath.Join(paths.root, "assets", "fonts"), filepath.Join(installRoot, "lib", "fonts"))
+	}); err != nil {
 		return err
 	}
 	if runtime.GOOS == "linux" {
-		return writeLinuxLauncher(installRoot)
+		return runStep("Write Linux GUI launcher", func() error { return writeLinuxLauncher(installRoot) })
 	}
 	launcher := []byte("@echo off\r\nset ROOT=%~dp0\r\n\"%ROOT%gui\\hpe-gui.exe\" %*\r\n")
-	return os.WriteFile(filepath.Join(installRoot, "hpe-gui.cmd"), launcher, 0o644)
+	return runStep("Write Windows GUI launcher", func() error { return os.WriteFile(filepath.Join(installRoot, "hpe-gui.cmd"), launcher, 0o644) })
+}
+
+func hostRuntimeID() string {
+	platform := "linux"
+	if runtime.GOOS == "windows" {
+		platform = "win"
+	}
+	arch := "x64"
+	if runtime.GOARCH == "arm64" {
+		arch = "arm64"
+	}
+	return platform + "-" + arch
 }
 
 func prepareVcpkgManifest(paths layout) (string, error) {
@@ -1765,10 +2236,21 @@ func runCommand(directory string, overrides map[string]string, name string, args
 	for key, value := range env {
 		command.Env = append(command.Env, key+"="+value)
 	}
-	fmt.Printf("+ %s %s\n", name, strings.Join(args, " "))
+	started := time.Now()
+	fmt.Printf("\n>>> [cwd=%q] %s\n", directory, formatCommand(name, args))
+	envKeys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		envKeys = append(envKeys, key)
+	}
+	sort.Strings(envKeys)
+	for _, key := range envKeys {
+		fmt.Printf("    env %s=%q\n", key, overrides[key])
+	}
 	if err := command.Run(); err != nil {
+		fmt.Printf("<<< FAILED after %s: %v\n", time.Since(started).Round(time.Millisecond), err)
 		return fmt.Errorf("command %s failed: %w", name, err)
 	}
+	fmt.Printf("<<< OK after %s: %s\n", time.Since(started).Round(time.Millisecond), name)
 	return nil
 }
 
@@ -1968,12 +2450,13 @@ type dotnetRelease struct {
 }
 
 func dotnetArtifact(p layout) (artifact, error) {
-	installed := filepath.Join(p.toolchain, "dotnet", "dotnet")
+	destination := filepath.Join(p.toolchain, "dotnet")
+	dotnetBinary := filepath.Join(destination, "dotnet")
 	if runtime.GOOS == "windows" {
-		installed += ".exe"
+		dotnetBinary += ".exe"
 	}
-	if info, err := os.Stat(installed); err == nil && !info.IsDir() {
-		return artifact{name: "dotnet-sdk-" + dotnetVersion, destination: filepath.Join(p.toolchain, "dotnet")}, nil
+	if digest, ok := installedArtifactDigest(destination, dotnetBinary); ok {
+		return artifact{name: "dotnet-sdk-" + dotnetVersion, sha256: digest, destination: destination}, nil
 	}
 	url := "https://builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json"
 	data, err := getBytes(url)
@@ -2020,12 +2503,13 @@ type goRelease struct {
 }
 
 func goArtifact(p layout) (artifact, error) {
-	binary := filepath.Join(p.toolchain, "go", "1.27.2", "bin", "go")
+	destination := filepath.Join(p.toolchain, "go", goVersion)
+	binary := filepath.Join(destination, "bin", "go")
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
-	if info, err := os.Stat(binary); err == nil && !info.IsDir() {
-		return artifact{name: "Go SDK " + goVersion, destination: filepath.Join(p.toolchain, "go", goVersion)}, nil
+	if digest, ok := installedArtifactDigest(destination, binary); ok {
+		return artifact{name: "Go SDK " + goVersion, sha256: digest, destination: destination}, nil
 	}
 	data, err := getBytes("https://go.dev/dl/?mode=json")
 	if err != nil {
@@ -2055,6 +2539,24 @@ func goArtifact(p layout) (artifact, error) {
 	return artifact{}, fmt.Errorf("Go SDK %s archive for %s/%s was not found in official metadata", version, goOS, goArch)
 }
 
+func installedArtifactDigest(destination, candidate string) (string, bool) {
+	if info, err := os.Stat(candidate); err != nil || info.IsDir() {
+		return "", false
+	}
+	data, err := os.ReadFile(filepath.Join(destination, ".hpe-artifact-sha256"))
+	if err != nil {
+		return "", false
+	}
+	digest := strings.ToLower(strings.TrimSpace(string(data)))
+	if len(digest) != 64 && len(digest) != 128 {
+		return "", false
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return "", false
+	}
+	return digest, true
+}
+
 func officialCMakeChecksum(filename string) (string, error) {
 	data, err := getBytes("https://cmake.org/files/v4.4/cmake-" + cmakeVersion + "-SHA-256.txt")
 	if err != nil {
@@ -2071,8 +2573,11 @@ func officialCMakeChecksum(filename string) (string, error) {
 
 func installArtifact(item artifact, downloads string) error {
 	if artifactInstalled(item) {
-		fmt.Printf("ready  %s\n", item.name)
+		fmt.Printf("Reusing complete installed artifact %s (verified SHA-256 %s)\n", item.name, item.sha256)
 		return nil
+	}
+	if item.sha256 == "" {
+		return fmt.Errorf("refusing to use or install %s without a pinned SHA-256", item.name)
 	}
 	archive := filepath.Join(downloads, item.name)
 	if err := downloadVerified(item.url, archive, item.sha256); err != nil {
@@ -2087,7 +2592,12 @@ func installArtifact(item artifact, downloads string) error {
 	if err := os.MkdirAll(tmp, 0o755); err != nil {
 		return err
 	}
+	fmt.Printf("Extracting verified archive %s into staging directory %s\n", archive, tmp)
 	if err := extractArchive(archive, tmp, item.format, item.strip); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(tmp, ".hpe-artifact-sha256"), []byte(strings.ToLower(item.sha256)+"\n"), 0o644); err != nil {
 		_ = os.RemoveAll(tmp)
 		return err
 	}
@@ -2095,11 +2605,14 @@ func installArtifact(item artifact, downloads string) error {
 		_ = os.RemoveAll(tmp)
 		return err
 	}
-	fmt.Printf("installed %s\n", item.name)
+	fmt.Printf("Installed %s from a SHA-256 verified archive\n", item.name)
 	return nil
 }
 
 func artifactInstalled(item artifact) bool {
+	if item.sha256 == "" {
+		return false
+	}
 	var candidate string
 	switch {
 	case strings.Contains(filepath.Base(item.destination), "zig"):
@@ -2131,18 +2644,37 @@ func artifactInstalled(item artifact) bool {
 		}
 	}
 	info, err := os.Stat(candidate)
-	return err == nil && !info.IsDir()
+	if err != nil || info.IsDir() {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(item.destination, ".hpe-artifact-sha256"))
+	return err == nil && strings.EqualFold(strings.TrimSpace(string(data)), item.sha256)
 }
 
 func downloadVerified(url, destination, expected string) error {
 	if expected == "" {
 		return errors.New("refusing to install an archive without a SHA-256")
 	}
-	if info, err := os.Stat(destination); err == nil && info.Size() > 0 {
+	info, statErr := os.Stat(destination)
+	if statErr == nil && info.Mode().IsRegular() && info.Size() > 0 {
 		if err := verifyDigest(destination, expected); err == nil {
+			fmt.Printf("Cached archive verified; skipping download: %s (SHA-256 %s)\n", filepath.Base(destination), expected)
 			return nil
 		}
-		_ = os.Remove(destination)
+		fmt.Printf("Cached archive failed SHA-256 verification; downloading again: %s\n", filepath.Base(destination))
+		if err := os.Remove(destination); err != nil {
+			return fmt.Errorf("remove invalid cached archive %s: %w", destination, err)
+		}
+	} else {
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		if statErr == nil {
+			if err := os.Remove(destination); err != nil {
+				return fmt.Errorf("remove incomplete cached archive %s: %w", destination, err)
+			}
+		}
+		fmt.Printf("No complete cached archive; downloading %s\n", filepath.Base(destination))
 	}
 	if strings.Contains(url, "cmake.org") && expected == "FETCH_OFFICIAL_CHECKSUM" {
 		return errors.New("internal checksum lookup should be resolved before download")
@@ -2150,9 +2682,12 @@ func downloadVerified(url, destination, expected string) error {
 	tmp := destination + ".part"
 	_ = os.Remove(tmp)
 	var last error
+	started := time.Now()
 	for attempt := 1; attempt <= 5; attempt++ {
+		fmt.Printf("Download attempt %d/5: %s\n", attempt, url)
 		if err := downloadOnce(url, tmp); err != nil {
 			last = err
+			fmt.Printf("Download attempt %d failed: %v\n", attempt, err)
 			_ = os.Remove(tmp)
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
@@ -2160,6 +2695,9 @@ func downloadVerified(url, destination, expected string) error {
 		if err := verifyDigest(tmp, expected); err != nil {
 			_ = os.Remove(tmp)
 			return err
+		}
+		if info, err := os.Stat(tmp); err == nil {
+			fmt.Printf("Downloaded archive passed SHA-256 verification: %s (%d bytes, %s)\n", filepath.Base(destination), info.Size(), time.Since(started).Round(time.Millisecond))
 		}
 		if err := os.Rename(tmp, destination); err != nil {
 			_ = os.Remove(tmp)
@@ -2198,6 +2736,7 @@ func downloadOnce(url, destination string) error {
 }
 
 func getBytes(url string) ([]byte, error) {
+	fmt.Printf("Fetching release/checksum metadata: %s\n", url)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -2212,7 +2751,11 @@ func getBytes(url string) ([]byte, error) {
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s: %s", url, response.Status)
 	}
-	return io.ReadAll(response.Body)
+	data, err := io.ReadAll(response.Body)
+	if err == nil {
+		fmt.Printf("Fetched metadata (%d bytes): %s\n", len(data), url)
+	}
+	return data, err
 }
 
 func verifyDigest(path, expected string) error {

@@ -22,7 +22,21 @@ bootstrap\bin\hpe-bootstrap-windows-x64.exe build
 
 Windows ARM64 uses `bootstrap/bin/hpe-bootstrap-windows-arm64.exe`. These small Go launchers are the only checked-in executables; they need no Go installation. They fetch and verify pinned Go, Zig, .NET, CMake, Ninja and (on Linux) Python distributions, then build ccache, native dependencies and HPE. They use all detected CPU cores; set `HPE_JOBS=8` to limit parallelism. Set `HPE_BUILD_ROOT` to place downloaded build programs, dependencies and intermediate files elsewhere; set `HPE_TOOL_ROOT` to relocate compiler SDKs. Final programs are installed to this checkout's platform-specific `install/<RID>/` directory. The bootstrap source is in `bootstrap/` and can be rebuilt with the downloaded Go SDK.
 
-Every `build` command saves a complete, timestamped log under `build/logs/` while continuing to show output in the terminal. The exact log path is printed when the build starts and finishes. Set `HPE_LOG_DIR` to store logs somewhere else; this is useful when Windows build logs should be directly visible to WSL. For example, if the checkout is `C:\Users\admin\src\HardwareProtocolEmulation`, set `HPE_LOG_DIR=C:\Users\admin\src\HardwareProtocolEmulation\build\logs` in Command Prompt, then open `/mnt/c/Users/admin/src/HardwareProtocolEmulation/build/logs/` from WSL. The default location is relative to the checkout's `HPE_BUILD_ROOT` when that variable is set.
+Every `tools`, `build`, `clean`, and `distclean` command saves a complete, timestamped log while continuing to show output in the terminal. Logs contain each named workflow step, command line and working directory, compiler/build output, download attempts, checksum results, cache reuse decisions, errors, and elapsed step times. The bootstrapper keeps the newest 10 log files and removes older ones automatically. The exact log path is printed when a command starts and finishes. Logs are stored in `build/logs/` by default; set `HPE_LOG_DIR` to use another directory. For Windows-to-WSL access, if the checkout is `C:\Users\admin\src\HardwareProtocolEmulation`, set `HPE_LOG_DIR=C:\Users\admin\src\HardwareProtocolEmulation\build\logs` in Command Prompt, then open `/mnt/c/Users/admin/src/HardwareProtocolEmulation/build/logs/` from WSL. The default location is relative to the checkout's `HPE_BUILD_ROOT` when that variable is set.
+
+Builds reuse the CMake/Ninja build tree, ccache entries, downloaded archives, verified compiler SDKs, dependency sources, vcpkg packages, and NuGet packages. Re-running `build` therefore recompiles changed source and reuses unchanged outputs. `clean` removes generated CMake/.NET intermediate output and installed HPE programs while retaining downloads, SDKs, dependency sources, tool installations, compiler/package caches, and logs. `distclean` removes the downloaded toolchains, dependencies, caches, intermediate files, and installed programs; it preserves the most recent 10 build logs so failures remain available for review. Both cleanup commands print each path they remove.
+
+```cmd
+bootstrap\bin\hpe-bootstrap-windows-x64.exe clean
+bootstrap\bin\hpe-bootstrap-windows-x64.exe distclean
+```
+
+On Linux, use the matching native bootstrapper:
+
+```sh
+./bootstrap/bin/hpe-bootstrap-linux-x64 clean
+./bootstrap/bin/hpe-bootstrap-linux-x64 distclean
+```
 
 To check that developer tools are not being found on the host, Linux can run `PATH=/nonexistent ./bootstrap/bin/hpe-bootstrap-linux-x64 build`. From Windows Command Prompt, run `set PATH=%SystemRoot%\System32` and then invoke the Windows bootstrap executable above. The bootstrapper adds only its project-local tools back to the build process PATH. vcpkg's DLL deployment uses its bundled executable implementation; the legacy PowerShell deployment path is explicitly disabled.
 
