@@ -73,6 +73,7 @@ set_target_properties(hpe_gui_bridge PROPERTIES
     INSTALL_RPATH "$ORIGIN/../lib")
 install(TARGETS hpe_gui_bridge RUNTIME DESTINATION gui LIBRARY DESTINATION gui
     ARCHIVE DESTINATION "${CMAKE_BINARY_DIR}/import-libs")
+install(FILES LICENSE.txt DESTINATION .)
 
 # Linux native libraries used by Avalonia's X11/Skia backends are packaged under install/lib.
 if(VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
