@@ -1,0 +1,6 @@
+[submodule "third_party/vcpkg"]
+	path = third_party/vcpkg
+	url = https://github.com/microsoft/vcpkg.git
+[submodule "third_party/ccache"]
+	path = third_party/ccache
+	url = https://github.com/ccache/ccache.git

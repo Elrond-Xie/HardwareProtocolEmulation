@@ -1,0 +1,12 @@
+if(NOT DEFINED ENV{HPE_CC} OR NOT DEFINED ENV{HPE_CXX})
+    message(FATAL_ERROR "Run the project build script so the local Zig toolchain is configured.")
+endif()
+
+set(CMAKE_C_COMPILER "$ENV{HPE_CC}" CACHE FILEPATH "Project-local C compiler wrapper")
+set(CMAKE_CXX_COMPILER "$ENV{HPE_CXX}" CACHE FILEPATH "Project-local C++ compiler wrapper")
+set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON CACHE BOOL "Keep bundled dependency headers ahead of host headers" FORCE)
+set(CMAKE_CROSSCOMPILING FALSE)
+if(DEFINED ENV{HPE_CCACHE})
+    set(CMAKE_C_COMPILER_LAUNCHER "$ENV{HPE_CCACHE}" CACHE FILEPATH "Project-local ccache")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "$ENV{HPE_CCACHE}" CACHE FILEPATH "Project-local ccache")
+endif()

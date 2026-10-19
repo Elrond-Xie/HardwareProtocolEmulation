@@ -1,0 +1,17 @@
+# I2C register devices: name, 7-bit address, register count, initial fill value
+device eeprom 0x50 256 0xFF
+device temperature_sensor 0x48 16 0x00
+
+# A device-specific discovery step can read a documented ID register.
+set 0x48 0x00 0x5A
+scan
+readreg 0x48 0x00 1
+
+# EEPROM register writes and combined write/repeated-START/read transaction.
+write 0x50 0x10 0xDE 0xAD 0xBE 0xEF
+readreg 0x50 0x10 4
+
+# Fault injection and expected failure handling.
+nack 0x50 1
+expect-nack 0x50
+probe 0x50

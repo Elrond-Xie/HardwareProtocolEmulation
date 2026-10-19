@@ -1,0 +1,16 @@
+/build/
+/toolchain/
+/out/
+/install/*
+!/install/.gitkeep
+.ccache/
+**/bin/
+**/obj/
+*.exe
+!/bootstrap/bin/
+!/bootstrap/bin/*
+!/bootstrap/bin/*.exe
+*.obj
+*.pdb
+*.ilk
+*.log

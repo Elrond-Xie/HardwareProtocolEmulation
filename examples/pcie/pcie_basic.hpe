@@ -1,0 +1,12 @@
+# Virtual PCIe endpoint: link training, config-space discovery and BAR0 MMIO.
+pcie-device demo 0 1 0 0x1AF4 0x1000 0x02 0x00 0x00 4096 3 4
+pcie-enumerate
+pcie-cfg-read 0 0 4
+pcie-cfg-write 0 0x10 4 0xFFFFFFFF
+pcie-cfg-read 0 0x10 4
+pcie-cfg-write 0 0x10 4 0x80000000
+pcie-cfg-read 0 0x10 4
+pcie-cfg-write 0 4 2 0x0002
+pcie-corrupt-next-tlp
+pcie-mmio-write 0 0 4 0xDEADBEEF
+pcie-mmio-read 0 0 4

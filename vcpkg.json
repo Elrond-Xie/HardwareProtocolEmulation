@@ -1,0 +1,15 @@
+{
+  "name": "hardware-protocol-emulation",
+  "version-string": "0.1.0",
+  "dependencies": [
+    { "name": "fontconfig", "platform": "linux" },
+    { "name": "freetype", "platform": "linux" },
+    { "name": "libice", "platform": "linux" },
+    { "name": "libsm", "platform": "linux" },
+    { "name": "libx11", "platform": "linux" },
+    { "name": "libxcb", "platform": "linux" }
+  ],
+  "overrides": [
+    { "name": "fontconfig", "version": "2.15.0", "port-version": 4 }
+  ]
+}

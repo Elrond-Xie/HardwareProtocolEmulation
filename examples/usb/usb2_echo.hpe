@@ -1,0 +1,27 @@
+# USB 2.0 full-speed control enumeration, bulk echo and interrupt reports.
+usb-device echo 0x1209 0x0001 HPE Protocol_Echo
+usb-enumerate 0
+# Confirm configuration and the active alternate setting.
+usb-control 0 1 0x80 8 0 0 1
+usb-control 0 1 0x81 10 0 0 1
+usb-control 0 1 0x01 11 0 0 0
+# Enable, inspect, then disable the configuration's remote-wakeup feature.
+usb-control 0 1 0x00 3 1 0 0
+usb-control 0 1 0x80 0 0 0 2
+usb-control 0 1 0x00 1 1 0 0
+usb-control 0 1 0x80 0 0 0 2
+# Query endpoint zero and demonstrate bulk endpoint halt recovery.
+usb-control 0 1 0x82 0 0 0 2
+usb-control 0 1 0x02 3 0 0x01 0
+usb-control 0 1 0x82 0 0 0x01 2
+usb-control 0 1 0x02 1 0 0x01 0
+usb-bulk-out 0 1 0x48 0x50 0x45 0x20 0x55 0x53 0x42 0x21
+usb-bulk-in 0 1 8
+# Interrupt endpoint 2 NAKs while idle, then reports a queued 3-byte notification.
+usb-interrupt-poll 0 1
+usb-interrupt-queue 0 0x10 0x20 0x30
+usb-interrupt-poll 0 1
+# Interrupt endpoint halt status and recovery.
+usb-control 0 1 0x02 3 0 0x82 0
+usb-control 0 1 0x82 0 0 0x82 2
+usb-control 0 1 0x02 1 0 0x82 0
