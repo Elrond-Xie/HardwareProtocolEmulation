@@ -31,11 +31,125 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
 )
+
+const (
+	ansi_reset  = "\x1b[0m"
+	ansi_bold   = "\x1b[1m"
+	ansi_cyan   = "\x1b[36m"
+	ansi_green  = "\x1b[32m"
+	ansi_gray   = "\x1b[90m"
+	ansi_yellow = "\x1b[33m"
+	ansi_red    = "\x1b[31m"
+)
+
+var terminal_colors_enabled bool
+
+// color_text adds an ANSI style only when the original output is an interactive color terminal.
+func color_text(text, style string) string {
+	if !terminal_colors_enabled {
+		return text
+	}
+	return style + text + ansi_reset
+}
+
+// terminal_supports_color avoids escape sequences for redirected output and known no-color terminals.
+func terminal_supports_color(output *os.File) bool {
+	if _, present := os.LookupEnv("NO_COLOR"); present || os.Getenv("CLICOLOR") == "0" {
+		return false
+	}
+	info, err := output.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	terminal := strings.ToLower(os.Getenv("TERM"))
+	if terminal == "dumb" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		if os.Getenv("WT_SESSION") != "" || os.Getenv("ANSICON") != "" || strings.EqualFold(os.Getenv("ConEmuANSI"), "ON") {
+			return true
+		}
+		return terminal_has_ansi(terminal)
+	}
+	return terminal != "" && terminal_has_ansi(terminal)
+}
+
+// terminal_has_ansi recognizes terminal families that support ANSI color sequences.
+func terminal_has_ansi(terminal string) bool {
+	for _, prefix := range []string{"xterm", "screen", "tmux", "rxvt", "vt100", "ansi", "cygwin", "msys", "linux"} {
+		if strings.HasPrefix(terminal, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ansi_stripping_writer removes terminal control sequences before data reaches a saved build log.
+type ansi_stripping_writer struct {
+	mu     sync.Mutex
+	writer io.Writer
+	state  uint8
+}
+
+// Write removes CSI and OSC escape sequences while preserving their state across writes.
+func (writer *ansi_stripping_writer) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	filtered := make([]byte, 0, len(data))
+	for _, value := range data {
+		switch writer.state {
+		case 0:
+			if value == 0x1b {
+				writer.state = 1
+			} else {
+				filtered = append(filtered, value)
+			}
+		case 1:
+			switch value {
+			case '[':
+				writer.state = 2
+			case ']':
+				writer.state = 3
+			default:
+				writer.state = 0
+			}
+		case 2:
+			if value >= 0x40 && value <= 0x7e {
+				writer.state = 0
+			}
+		case 3:
+			if value == 0x07 {
+				writer.state = 0
+			} else if value == 0x1b {
+				writer.state = 4
+			}
+		case 4:
+			if value == '\\' {
+				writer.state = 0
+			} else if value != 0x1b {
+				writer.state = 3
+			}
+		}
+	}
+	if len(filtered) == 0 {
+		return len(data), nil
+	}
+	written, err := writer.writer.Write(filtered)
+	if err != nil {
+		return len(data), err
+	}
+	if written != len(filtered) {
+		return len(data), io.ErrShortWrite
+	}
+	return len(data), nil
+}
 
 const (
 	zig_version    = "0.17.0"
@@ -82,7 +196,9 @@ func main() {
 
 // run_bootstrap implements the run bootstrap operation.
 func run_bootstrap(args []string) int {
+	terminal_colors_enabled = terminal_supports_color(os.Stdout)
 	var capture *build_log
+	var command_paths layout
 	command_name := ""
 	if len(args) > 0 {
 		switch args[0] {
@@ -93,21 +209,22 @@ func run_bootstrap(args []string) int {
 	if command_name != "" {
 		paths, err := project_layout()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "hpe-bootstrap:", err)
+			fmt.Fprintln(os.Stderr, color_text("hpe-bootstrap: "+err.Error(), ansi_red))
 			return 1
 		}
 		if err := prepare_managed_roots(paths); err != nil {
-			fmt.Fprintln(os.Stderr, "hpe-bootstrap:", err)
+			fmt.Fprintln(os.Stderr, color_text("hpe-bootstrap: "+err.Error(), ansi_red))
 			return 1
 		}
+		command_paths = paths
 		log_dir := build_log_directory(paths)
 		capture, err = start_build_log(log_dir)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "hpe-bootstrap: cannot create build log:", err)
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "Build log: %s\n", capture.path)
-		fmt.Fprintf(os.Stdout, "HPE %s started at %s (%s/%s)\n", command_name, time.Now().Format(time.RFC3339), runtime.GOOS, runtime.GOARCH)
+		fmt.Fprintf(os.Stderr, "%s\n", color_text("Build log: "+capture.path, ansi_cyan))
+		fmt.Fprintf(os.Stdout, "%s\n", color_text(fmt.Sprintf("HPE %s started at %s (%s/%s)", command_name, time.Now().Format(time.RFC3339), runtime.GOOS, runtime.GOARCH), ansi_bold+ansi_cyan))
 		fmt.Fprintf(os.Stdout, "Working directory: %q\nProject root: %q\nBuild root: %q\nToolchain root: %q\nCommand: %s\n\n",
 			current_directory(), paths.root, paths.build, paths.toolchain, format_command("hpe-bootstrap", args))
 		if err := prune_build_logs(filepath.Dir(capture.path), max_build_logs); err != nil {
@@ -120,7 +237,7 @@ func run_bootstrap(args []string) int {
 	err := run(args)
 	code := 0
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "hpe-bootstrap:", err)
+		fmt.Fprintln(os.Stderr, color_text("hpe-bootstrap: "+err.Error(), ansi_red))
 		code = 1
 	}
 	if capture != nil {
@@ -128,10 +245,31 @@ func run_bootstrap(args []string) int {
 		if code != 0 {
 			status = "failed"
 		}
-		fmt.Fprintf(os.Stdout, "\nHPE %s %s at %s\nBuild log saved to: %s\n", command_name, status, time.Now().Format(time.RFC3339), capture.path)
+		if command_name == "distclean" && code == 0 {
+			fmt.Fprintf(os.Stdout, "\nHPE distclean completed at %s; removing the build root and discarding this log on success.\n", time.Now().Format(time.RFC3339))
+		} else {
+			style := ansi_green
+			if code != 0 {
+				style = ansi_red
+			}
+			fmt.Fprintf(os.Stdout, "\n%s\nBuild log saved to: %s\n", color_text(fmt.Sprintf("HPE %s %s at %s", command_name, status, time.Now().Format(time.RFC3339)), style), capture.path)
+		}
 		if close_err := capture.Close(); close_err != nil {
 			fmt.Fprintf(capture.console_err, "hpe-bootstrap: finalize build log: %v\n", close_err)
 			code = 1
+			if command_name == "distclean" {
+				fmt.Fprintf(capture.console_err, "Build log retained at: %s\n", capture.path)
+			}
+		}
+		if command_name == "distclean" && code == 0 {
+			if err := remove_distclean_build_root(command_paths.build, capture.path); err != nil {
+				code = 1
+				message := fmt.Sprintf("hpe-bootstrap: remove build root after distclean: %v", err)
+				_ = append_build_log(capture.path, "\n"+message+"\n")
+				fmt.Fprintf(capture.console_err, "%s\nBuild log saved to: %s\n", message, capture.path)
+			} else {
+				fmt.Fprintf(capture.console_out, "Distclean succeeded; build root removed and its log discarded: %s\n", command_paths.build)
+			}
 		}
 	}
 	return code
@@ -349,15 +487,17 @@ func start_build_log(directory string) (*build_log, error) {
 		stdout_pipe: stdout_pipe, stderr_pipe: stderr_pipe,
 	}
 	shared_log := &synchronized_writer{w: file}
+	stdout_log := &ansi_stripping_writer{writer: shared_log}
+	stderr_log := &ansi_stripping_writer{writer: shared_log}
 	log.drains.Add(2)
 	go func() {
 		defer log.drains.Done()
-		_, _ = io.Copy(io.MultiWriter(log.console_out, shared_log), stdout_read)
+		_, _ = io.Copy(io.MultiWriter(log.console_out, stdout_log), stdout_read)
 		_ = stdout_read.Close()
 	}()
 	go func() {
 		defer log.drains.Done()
-		_, _ = io.Copy(io.MultiWriter(log.console_err, shared_log), stderr_read)
+		_, _ = io.Copy(io.MultiWriter(log.console_err, stderr_log), stderr_read)
 		_ = stderr_read.Close()
 	}()
 	os.Stdout, os.Stderr = stdout_pipe, stderr_pipe
@@ -400,11 +540,17 @@ func format_command(name string, args []string) string {
 // run implements the run operation.
 func run(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
-		fmt.Println("Usage: hpe-bootstrap <tools|build|clean|distclean|help>")
-		fmt.Println("  tools   Download and install pinned local compiler/build SDKs")
-		fmt.Println("  build   Build and install HPE for the current host")
-		fmt.Println("  clean   Remove intermediate outputs and installed programs, keeping downloads and caches")
-		fmt.Println("  distclean Remove all downloaded and generated build data, keeping the last 10 logs")
+		writer := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
+		fmt.Fprintln(writer, "Usage: hpe-bootstrap <tools|build|clean|distclean|help>")
+		fmt.Fprintln(writer, "Commands:")
+		fmt.Fprintln(writer, "  tools\tDownload and install pinned local compiler/build SDKs")
+		fmt.Fprintln(writer, "  build\tBuild and install HPE for the current host")
+		fmt.Fprintln(writer, "  clean\tRemove intermediate outputs and installed programs, keeping downloads and caches")
+		fmt.Fprintln(writer, "  distclean\tRemove all downloaded and generated build data; discard its log on success and keep it on failure")
+		fmt.Fprintln(writer, "  help\tShow this help message")
+		if err := writer.Flush(); err != nil {
+			return fmt.Errorf("write help output: %w", err)
+		}
 		return nil
 	}
 	if args[0] != "tools" && args[0] != "build" && args[0] != "clean" && args[0] != "distclean" {
@@ -429,12 +575,12 @@ func run(args []string) error {
 // run_step implements the run step operation.
 func run_step(name string, action func() error) error {
 	started := time.Now()
-	fmt.Printf("\n=== %s ===\n", name)
+	fmt.Printf("\n%s\n", color_text("=== "+name+" ===", ansi_bold+ansi_cyan))
 	if err := action(); err != nil {
-		fmt.Printf("=== FAILED: %s (%s): %v ===\n", name, time.Since(started).Round(time.Millisecond), err)
+		fmt.Printf("%s\n", color_text(fmt.Sprintf("=== FAILED: %s (%s): %v ===", name, time.Since(started).Round(time.Millisecond), err), ansi_red))
 		return fmt.Errorf("%s: %w", name, err)
 	}
-	fmt.Printf("=== DONE: %s (%s) ===\n", name, time.Since(started).Round(time.Millisecond))
+	fmt.Printf("%s\n", color_text(fmt.Sprintf("=== DONE: %s (%s) ===", name, time.Since(started).Round(time.Millisecond)), ansi_green))
 	return nil
 }
 
@@ -600,7 +746,116 @@ func remove_generated_path(project_root, target string) error {
 		return err
 	}
 	fmt.Printf("Removing: %s\n", target)
+	if err := make_generated_path_writable(target); err != nil {
+		return err
+	}
 	return os.RemoveAll(target)
+}
+
+// make_generated_path_writable allows cleanup of read-only files and directories in generated caches.
+func make_generated_path_writable(target string) error {
+	return filepath.WalkDir(target, func(path string, entry os.DirEntry, walk_err error) error {
+		if walk_err != nil {
+			return walk_err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		if mode.IsDir() {
+			mode |= 0o700
+		} else {
+			mode |= 0o200
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			return fmt.Errorf("make generated path writable %s: %w", path, err)
+		}
+		return nil
+	})
+}
+
+// remove_distclean_build_root removes the build directory and retains a log only if removal fails.
+func remove_distclean_build_root(build_root, log_path string) error {
+	build_root, err := filepath.Abs(build_root)
+	if err != nil {
+		return err
+	}
+	log_path, err = filepath.Abs(log_path)
+	if err != nil {
+		return err
+	}
+	backup_directory := os.TempDir()
+	if path_contains(build_root, backup_directory) {
+		backup_directory = filepath.Dir(build_root)
+	}
+	backup, err := os.CreateTemp(backup_directory, ".hpe-distclean-log-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary distclean log backup: %w", err)
+	}
+	backup_path := backup.Name()
+	log_file, err := os.Open(log_path)
+	if err != nil {
+		_ = backup.Close()
+		_ = os.Remove(backup_path)
+		return fmt.Errorf("open distclean log for backup: %w", err)
+	}
+	_, copy_err := io.Copy(backup, log_file)
+	log_close_err := log_file.Close()
+	if copy_err != nil || log_close_err != nil {
+		_ = backup.Close()
+		_ = os.Remove(backup_path)
+		return fmt.Errorf("back up distclean log: %w", errors.Join(copy_err, log_close_err))
+	}
+	if err := backup.Sync(); err != nil {
+		_ = backup.Close()
+		_ = os.Remove(backup_path)
+		return fmt.Errorf("sync distclean log backup: %w", err)
+	}
+	if err := backup.Close(); err != nil {
+		_ = os.Remove(backup_path)
+		return fmt.Errorf("close distclean log backup: %w", err)
+	}
+	defer os.Remove(backup_path)
+
+	restore_log := func(cause error) error {
+		if restore_err := copy_file(backup_path, log_path, 0o644); restore_err != nil {
+			return fmt.Errorf("%w; also failed to restore the distclean log at %s: %v", cause, log_path, restore_err)
+		}
+		return cause
+	}
+	if _, err := os.Lstat(build_root); err == nil {
+		if err := make_generated_path_writable(build_root); err != nil {
+			return restore_log(fmt.Errorf("make build root removable: %w", err))
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return restore_log(err)
+	}
+	if err := os.RemoveAll(build_root); err != nil {
+		return restore_log(fmt.Errorf("remove build root %s: %w", build_root, err))
+	}
+	if !path_contains(build_root, log_path) {
+		if err := os.Remove(log_path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return restore_log(fmt.Errorf("remove successful distclean log %s: %w", log_path, err))
+		}
+	}
+	return nil
+}
+
+// append_build_log appends a finalization error after a failed distclean cleanup.
+func append_build_log(path, message string) error {
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(file, message); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 // validate_generated_path implements the validate generated path operation.
@@ -2826,10 +3081,10 @@ func download_verified(url, destination, expected string) error {
 	info, stat_err := os.Stat(destination)
 	if stat_err == nil && info.Mode().IsRegular() && info.Size() > 0 {
 		if err := verify_digest(destination, expected); err == nil {
-			fmt.Printf("Cached archive verified; skipping download: %s (SHA-256 %s)\n", filepath.Base(destination), expected)
+			fmt.Println(color_text(fmt.Sprintf("Cached archive verified; skipping download: %s (SHA-256 %s)", filepath.Base(destination), expected), ansi_green))
 			return nil
 		}
-		fmt.Printf("Cached archive failed SHA-256 verification; downloading again: %s\n", filepath.Base(destination))
+		fmt.Println(color_text("Cached archive failed SHA-256 verification; downloading again: "+filepath.Base(destination), ansi_yellow))
 		if err := os.Remove(destination); err != nil {
 			return fmt.Errorf("remove invalid cached archive %s: %w", destination, err)
 		}
@@ -2842,7 +3097,7 @@ func download_verified(url, destination, expected string) error {
 				return fmt.Errorf("remove incomplete cached archive %s: %w", destination, err)
 			}
 		}
-		fmt.Printf("No complete cached archive; downloading %s\n", filepath.Base(destination))
+		fmt.Println(color_text("No complete cached archive; downloading "+filepath.Base(destination), ansi_cyan))
 	}
 	if strings.Contains(url, "cmake.org") && expected == "FETCH_OFFICIAL_CHECKSUM" {
 		return errors.New("internal checksum lookup should be resolved before download")
@@ -2852,20 +3107,20 @@ func download_verified(url, destination, expected string) error {
 	var last error
 	started := time.Now()
 	for attempt := 1; attempt <= 5; attempt++ {
-		fmt.Printf("Download attempt %d/5: %s\n", attempt, url)
+		fmt.Println(color_text(fmt.Sprintf("Download attempt %d/5: %s", attempt, url), ansi_cyan))
 		if err := download_once(url, tmp); err != nil {
 			last = err
-			fmt.Printf("Download attempt %d failed: %v\n", attempt, err)
+			fmt.Println(color_text(fmt.Sprintf("Download attempt %d failed: %v", attempt, err), ansi_red))
 			_ = os.Remove(tmp)
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
 		if err := verify_digest(tmp, expected); err != nil {
 			_ = os.Remove(tmp)
-			return err
+			return fmt.Errorf("downloaded archive verification failed: %w", err)
 		}
 		if info, err := os.Stat(tmp); err == nil {
-			fmt.Printf("Downloaded archive passed SHA-256 verification: %s (%d bytes, %s)\n", filepath.Base(destination), info.Size(), time.Since(started).Round(time.Millisecond))
+			fmt.Println(color_text(fmt.Sprintf("Downloaded archive passed SHA-256 verification: %s (%d bytes, %s)", filepath.Base(destination), info.Size(), time.Since(started).Round(time.Millisecond)), ansi_green))
 		}
 		if err := os.Rename(tmp, destination); err != nil {
 			_ = os.Remove(tmp)
@@ -2896,17 +3151,182 @@ func download_once(url, destination string) error {
 	if err != nil {
 		return err
 	}
-	_, copy_err := io.Copy(file, response.Body)
+	progress := &download_progress_reader{
+		reader: response.Body, name: filepath.Base(destination), total: response.ContentLength,
+		started: time.Now(), last_update: time.Now(),
+	}
+	progress.render(false, true)
+	_, copy_err := io.Copy(file, progress)
 	close_err := file.Close()
+	progress.render(true, copy_err == nil && close_err == nil)
 	if copy_err != nil {
 		return copy_err
 	}
 	return close_err
 }
 
+// download_progress_reader tracks transferred bytes and periodically renders progress and speed.
+type download_progress_reader struct {
+	reader          io.Reader
+	name            string
+	total           int64
+	downloaded      int64
+	started         time.Time
+	last_update     time.Time
+	last_downloaded int64
+	speed           float64
+	rendered_width  int
+}
+
+// Read implements the Read operation and updates the download display at a limited rate.
+func (progress *download_progress_reader) Read(buffer []byte) (int, error) {
+	read_count, err := progress.reader.Read(buffer)
+	if read_count > 0 {
+		progress.downloaded += int64(read_count)
+		now := time.Now()
+		elapsed := now.Sub(progress.last_update)
+		if elapsed >= 400*time.Millisecond {
+			progress.speed = float64(progress.downloaded-progress.last_downloaded) / elapsed.Seconds()
+			progress.last_downloaded = progress.downloaded
+			progress.last_update = now
+			progress.render(false, true)
+		}
+	}
+	return read_count, err
+}
+
+// render writes a single-line progress bar with transferred bytes and transfer speed.
+func (progress *download_progress_reader) render(finished, succeeded bool) {
+	const bar_width = 24
+	if finished {
+		elapsed := time.Since(progress.started).Seconds()
+		if elapsed > 0 {
+			progress.speed = float64(progress.downloaded) / elapsed
+		}
+	}
+	var complete_bar, remaining_bar, amount string
+	var percentage, duration string
+	if progress.total > 0 {
+		fraction := float64(progress.downloaded) / float64(progress.total)
+		if fraction > 1 {
+			fraction = 1
+		}
+		filled := int(fraction * bar_width)
+		complete_bar = strings.Repeat("━", filled)
+		if filled < bar_width {
+			complete_bar += "╸"
+			remaining_bar = strings.Repeat("─", bar_width-filled-1)
+		}
+		percentage = fmt.Sprintf("%5.1f%%", fraction*100)
+		amount = fmt.Sprintf("%s/%s", format_download_size(float64(progress.downloaded)), format_download_size(float64(progress.total)))
+		if progress.speed > 0 {
+			duration = format_download_duration(float64(progress.total-progress.downloaded) / progress.speed)
+		} else {
+			duration = "--:--"
+		}
+	} else {
+		position := int(time.Since(progress.started).Seconds()*8) % (bar_width - 5)
+		complete_bar = strings.Repeat("─", position) + strings.Repeat("━", 5)
+		remaining_bar = strings.Repeat("─", bar_width-position-5)
+		amount = format_download_size(float64(progress.downloaded))
+		duration = format_download_duration(time.Since(progress.started).Seconds())
+	}
+	state := ""
+	if finished && !succeeded {
+		state = " (incomplete)"
+	}
+	speed := format_download_size(progress.speed) + "/s"
+	var line string
+	if progress.total > 0 {
+		line = fmt.Sprintf("Downloading %-30s [%s%s] %s %s %s/s ETA %s%s", progress.name,
+			complete_bar, remaining_bar, percentage, amount, format_download_size(progress.speed), duration, state)
+	} else {
+		line = fmt.Sprintf("Downloading %-30s [%s%s] %s %s elapsed %s%s", progress.name,
+			complete_bar, remaining_bar, amount, speed, duration, state)
+	}
+	padding := ""
+	if line_width := utf8.RuneCountInString(line); line_width < progress.rendered_width {
+		padding = strings.Repeat(" ", progress.rendered_width-line_width)
+		line += padding
+	} else {
+		progress.rendered_width = line_width
+	}
+	styled_line := line
+	if terminal_colors_enabled {
+		name_prefix := fmt.Sprintf("Downloading %-30s [", progress.name)
+		styled_line = color_text(name_prefix, ansi_cyan) + color_text(complete_bar, ansi_green) +
+			color_text(remaining_bar, ansi_gray) + "] "
+		if progress.total > 0 {
+			eta_style := download_speed_style(progress.total, progress.downloaded, progress.speed)
+			styled_line += color_text(percentage, ansi_cyan) + " " + color_text(amount, ansi_cyan) + " " +
+				color_text(format_download_size(progress.speed)+"/s", eta_style) + " " + color_text("ETA "+duration, eta_style)
+		} else {
+			styled_line += color_text(amount, ansi_cyan) + " " + color_text(speed, ansi_cyan) +
+				" elapsed " + color_text(duration, ansi_cyan)
+		}
+		styled_line += color_text(state, ansi_red) + padding
+		if finished && succeeded {
+			styled_line = color_text(line, ansi_green)
+		} else if finished {
+			styled_line = color_text(line, ansi_red)
+		}
+	}
+	fmt.Printf("\r%s", styled_line)
+	if finished {
+		fmt.Print("\n")
+	}
+}
+
+// format_download_duration renders ETA and elapsed time in a stable, compact clock format.
+func format_download_duration(seconds float64) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	whole_seconds := int64(seconds + 0.5)
+	hours := whole_seconds / 3600
+	minutes := (whole_seconds % 3600) / 60
+	remaining_seconds := whole_seconds % 60
+	if hours > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, remaining_seconds)
+	}
+	return fmt.Sprintf("%d:%02d", minutes, remaining_seconds)
+}
+
+// download_speed_style colors transfer speed by estimated remaining time rather than a network-specific rate.
+func download_speed_style(total, downloaded int64, speed float64) string {
+	if total <= 0 {
+		return ansi_cyan
+	}
+	if speed <= 0 {
+		return ansi_red
+	}
+	remaining := float64(total-downloaded) / speed
+	if remaining <= 30 {
+		return ansi_green
+	}
+	if remaining <= 120 {
+		return ansi_yellow
+	}
+	return ansi_red
+}
+
+// format_download_size renders byte counts with readable binary units.
+func format_download_size(size float64) string {
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	unit_index := 0
+	for size >= 1024 && unit_index < len(units)-1 {
+		size /= 1024
+		unit_index++
+	}
+	if unit_index == 0 {
+		return fmt.Sprintf("%.0f %s", size, units[unit_index])
+	}
+	return fmt.Sprintf("%.1f %s", size, units[unit_index])
+}
+
 // get_bytes implements the get bytes operation.
 func get_bytes(url string) ([]byte, error) {
-	fmt.Printf("Fetching release/checksum metadata: %s\n", url)
+	fmt.Println(color_text("Fetching release/checksum metadata: "+url, ansi_cyan))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

@@ -74,7 +74,7 @@ bootstrap\bin\hpe-bootstrap-windows-x64.exe build
 
 `HPE_JOBS` 是可选项；默认使用检测到的 CPU 核心数。执行 `set HPE_JOBS=` 可在当前命令提示符会话中清除该设置。构建目标是当前主机的操作系统和架构；引导程序不会为其他平台交叉编译应用程序。
 
-引导程序会将编译器 SDK 下载并解压到 `build/toolchains/`。下载的构建工具、依赖源码、编译出的依赖和中间文件位于 `build/`。最终应用程序及运行文件输出到 `install/<RID>/`，例如 `install/linux-x64/` 或 `install/win-x64/`。构建支持增量编译，并会复用已校验的下载文件、CMake/Ninja 构建目录、ccache 条目、vcpkg 包和 NuGet 包。Linux 主机已安装 Git 时，引导程序会浅层拉取固定提交的 vcpkg 和 ccache 源码，校验提交号后删除 Git 元数据；Git 不可用或拉取失败时，会自动下载并校验固定 SHA-256 的 tar.gz 归档。Windows 则由引导程序直接下载并校验 ZIP 归档，不需要 Git for Windows。其他依赖源码同样由引导程序在构建过程中自动获取并校验。
+引导程序会将编译器 SDK 下载并解压到 `build/toolchains/`。下载时会显示进度、已下载大小和当前速度。下载的构建工具、依赖源码、编译出的依赖和中间文件位于 `build/`。最终应用程序及运行文件输出到 `install/<RID>/`，例如 `install/linux-x64/` 或 `install/win-x64/`。构建支持增量编译，并会复用已校验的下载文件、CMake/Ninja 构建目录、ccache 条目、vcpkg 包和 NuGet 包。Linux 主机已安装 Git 时，引导程序会浅层拉取固定提交的 vcpkg 和 ccache 源码，校验提交号后删除 Git 元数据；Git 不可用或拉取失败时，会自动下载并校验固定 SHA-256 的 tar.gz 归档。Windows 则由引导程序直接下载并校验 ZIP 归档，不需要 Git for Windows。其他依赖源码同样由引导程序在构建过程中自动获取并校验。
 
 默认使用检测到的全部 CPU 核心。可通过 `HPE_JOBS` 限制并行任务数，也可以设置以下路径：
 
@@ -112,7 +112,7 @@ Linux 仍需要主机内核和兼容的系统 C 库。运行 Linux GUI 还需要
 
 ## 构建日志与清理
 
-`tools`、`build`、`clean` 和 `distclean` 命令会记录完整流程日志，同时在终端显示进度。日志包含步骤名称、命令及工作目录、下载和校验结果、缓存复用情况、编译器输出、错误和耗时。每个配置的日志目录保留最新 10 份，较旧日志会自动删除。
+`tools`、`build` 和 `clean` 命令会记录完整流程日志，同时在终端显示进度。日志包含步骤名称、命令及工作目录、下载和校验结果、缓存复用情况、编译器输出、错误和耗时。每个配置的日志目录最多保留最新 10 份，较旧日志会自动删除。`distclean` 执行期间会临时记录日志：成功后删除整个 `build` 目录并丢弃本次日志；失败时则保留日志用于排查。
 
 ```sh
 # Linux
@@ -126,9 +126,7 @@ bootstrap\bin\hpe-bootstrap-windows-x64.exe clean
 bootstrap\bin\hpe-bootstrap-windows-x64.exe distclean
 ```
 
-`clean` 会删除构建中间文件和已安装的 HPE 程序，同时保留下载归档、工具链、依赖源码、工具安装目录、包和编译器缓存以及日志。`distclean` 还会删除已下载的工具链、依赖和缓存，但保留最新 10 份日志。每条命令开始和结束时都会显示日志的具体路径。
-
-[无预装工具构建工作流](.github/workflows/zero-tool-build.yml)会在 Linux 和 Windows 托管运行器上检查全新构建，不依赖预装的开发工具。
+`clean` 会删除构建中间文件和已安装的 HPE 程序，同时保留下载归档、工具链、依赖源码、工具安装目录、包和编译器缓存以及日志。`distclean` 会删除整个 `build` 目录，包括下载内容、缓存和旧日志。本次 `distclean` 日志在清理成功后丢弃，清理失败时保留用于分析。命令开始时会显示临时日志路径；若失败，结束时会再次显示保留的日志路径。
 
 ## 运行
 

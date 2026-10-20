@@ -74,7 +74,7 @@ bootstrap\bin\hpe-bootstrap-windows-x64.exe build
 
 `HPE_JOBS` is optional; by default the build uses the detected CPU count. `set HPE_JOBS=` clears the setting in the current Command Prompt session. Builds target the host operating system and architecture; the bootstrapper does not cross-compile the application for another platform.
 
-The bootstrapper downloads compiler SDKs and extracts them under `build/toolchains/`. Downloaded build tools, dependency sources, compiled dependencies and intermediate files go under `build/`. Final applications and runtime files are written to `install/<RID>/`, such as `install/linux-x64/` or `install/win-x64/`. Build output is incremental and reuses verified downloads, CMake/Ninja build trees, ccache entries, vcpkg packages and NuGet packages. On Linux, the bootstrapper shallow-fetches the pinned vcpkg and ccache commits with system Git when available, verifies the exact commit, and removes Git metadata. If Git is unavailable or the checkout fails, it automatically downloads the pinned SHA-256-verified tarballs. On Windows, it downloads and verifies ZIP archives directly, so Git for Windows is not required. The bootstrapper also downloads and verifies other dependency sources as part of the build.
+The bootstrapper downloads compiler SDKs and extracts them under `build/toolchains/`. Downloads show transfer progress, byte counts and current speed. Downloaded build tools, dependency sources, compiled dependencies and intermediate files go under `build/`. Final applications and runtime files are written to `install/<RID>/`, such as `install/linux-x64/` or `install/win-x64/`. Build output is incremental and reuses verified downloads, CMake/Ninja build trees, ccache entries, vcpkg packages and NuGet packages. On Linux, the bootstrapper shallow-fetches the pinned vcpkg and ccache commits with system Git when available, verifies the exact commit, and removes Git metadata. If Git is unavailable or the checkout fails, it automatically downloads the pinned SHA-256-verified tarballs. On Windows, it downloads and verifies ZIP archives directly, so Git for Windows is not required. The bootstrapper also downloads and verifies other dependency sources as part of the build.
 
 The build uses all detected CPU cores by default. Set `HPE_JOBS` to limit parallelism, and optionally set these paths:
 
@@ -112,7 +112,7 @@ Linux still uses the host kernel and compatible system C library. Running the Li
 
 ## Build logs and cleanup
 
-The `tools`, `build`, `clean` and `distclean` commands write a full workflow log while also printing progress to the terminal. Logs include named steps, commands and working directories, download and checksum results, cache decisions, compiler output, errors and elapsed times. The newest 10 logs are retained in each configured log directory; older logs are removed automatically.
+The `tools`, `build` and `clean` commands write a full workflow log while also printing progress to the terminal. Logs include named steps, commands and working directories, download and checksum results, cache decisions, compiler output, errors and elapsed times. The newest 10 retained logs are kept in each configured log directory; older logs are removed automatically. `distclean` records a temporary log while running: on success it removes the entire build directory and discards that log, while on failure it keeps the log for diagnosis.
 
 ```sh
 # Linux
@@ -126,9 +126,7 @@ bootstrap\bin\hpe-bootstrap-windows-x64.exe clean
 bootstrap\bin\hpe-bootstrap-windows-x64.exe distclean
 ```
 
-`clean` removes generated build intermediates and installed HPE applications while keeping downloaded archives, toolchains, dependency sources, tool installations, package/compiler caches and logs. `distclean` also removes downloaded toolchains, dependencies and caches; the most recent 10 logs are preserved. The exact log path is printed when each command starts and finishes.
-
-The [Zero-tool build workflow](.github/workflows/zero-tool-build.yml) checks clean Linux and Windows hosted runners without relying on preinstalled development tools.
+`clean` removes generated build intermediates and installed HPE applications while keeping downloaded archives, toolchains, dependency sources, tool installations, package/compiler caches and logs. `distclean` removes the complete build directory, including downloaded files, caches and old logs. Its own log is discarded after a successful cleanup and retained if cleanup fails. The temporary log path is printed when the command starts; on failure, the retained log path is printed again.
 
 ## Run
 
