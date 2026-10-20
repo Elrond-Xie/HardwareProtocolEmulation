@@ -1,5 +1,4 @@
 /build/
-/toolchain/
 /out/
 /install/*
 !/install/.gitkeep
@@ -14,3 +13,6 @@
 *.pdb
 *.ilk
 *.log
+
+# GitHub automation is intentionally kept local for now.
+/.github/

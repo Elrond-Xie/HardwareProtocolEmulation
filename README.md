@@ -20,7 +20,19 @@ These are teaching models, not complete electrical or standards-conformance impl
 
 ## Build
 
-HPE provides native build bootstrappers for Linux and Windows. Run the commands below from the repository root (the directory containing `README.md`). A clean build needs an internet connection to download pinned, SHA-256-verified toolchain and dependency archives. It does not require a preinstalled compiler, Go, Python, .NET SDK, CMake, Ninja, Git, or package manager. The `build` command downloads and installs the required local tools automatically; running `tools` first is optional.
+HPE provides native build bootstrappers for Linux and Windows. Run the build commands below from the repository root (the directory containing `README.md`). A clean build needs an internet connection to download pinned, SHA-256-verified toolchain and dependency archives. Once the source is present, building does not require a preinstalled compiler, Go, Python, .NET SDK, CMake, Ninja, Git, or package manager. The `build` command downloads and installs the required local tools automatically; running `tools` first is optional.
+
+### Getting the source
+
+On Linux, clone the repository:
+
+```sh
+git clone https://github.com/Elrond-Xie/HardwareProtocolEmulation.git
+cd HardwareProtocolEmulation
+./bootstrap/bin/hpe-bootstrap-linux-x64 build
+```
+
+On Windows, get the project source ZIP from the [GitHub repository page](https://github.com/Elrond-Xie/HardwareProtocolEmulation) using **Code → Download ZIP**, then extract it with File Explorer. Open **Command Prompt** in the extracted project directory and run the Windows build command below. This ZIP does not contain Git history, so get a fresh ZIP to update it. You do not need to find or download compiler SDKs or dependency packages yourself; the bootstrapper downloads and verifies them during the build. On Windows ARM64, use `hpe-bootstrap-windows-arm64.exe` instead.
 
 ### Linux
 
@@ -62,7 +74,7 @@ bootstrap\bin\hpe-bootstrap-windows-x64.exe build
 
 `HPE_JOBS` is optional; by default the build uses the detected CPU count. `set HPE_JOBS=` clears the setting in the current Command Prompt session. Builds target the host operating system and architecture; the bootstrapper does not cross-compile the application for another platform.
 
-The bootstrapper downloads compiler SDKs to the ignored root-level `toolchain/` directory. Downloaded build tools, dependency sources, compiled dependencies and intermediate files go under `build/`. Final applications and runtime files are written to `install/<RID>/`, such as `install/linux-x64/` or `install/win-x64/`. Build output is incremental and reuses verified downloads, CMake/Ninja build trees, ccache entries, vcpkg packages and NuGet packages.
+The bootstrapper downloads compiler SDKs and extracts them under `build/toolchains/`. Downloaded build tools, dependency sources, compiled dependencies and intermediate files go under `build/`. Final applications and runtime files are written to `install/<RID>/`, such as `install/linux-x64/` or `install/win-x64/`. Build output is incremental and reuses verified downloads, CMake/Ninja build trees, ccache entries, vcpkg packages and NuGet packages. On Linux, the bootstrapper shallow-fetches the pinned vcpkg and ccache commits with system Git when available, verifies the exact commit, and removes Git metadata. If Git is unavailable or the checkout fails, it automatically downloads the pinned SHA-256-verified tarballs. On Windows, it downloads and verifies ZIP archives directly, so Git for Windows is not required. The bootstrapper also downloads and verifies other dependency sources as part of the build.
 
 The build uses all detected CPU cores by default. Set `HPE_JOBS` to limit parallelism, and optionally set these paths:
 
@@ -70,7 +82,7 @@ The build uses all detected CPU cores by default. Set `HPE_JOBS` to limit parall
 | --- | --- | --- |
 | `HPE_JOBS` | Maximum parallel build jobs | Detected CPU count |
 | `HPE_BUILD_ROOT` | Downloaded build tools, dependencies, caches and intermediate output | `<checkout>/build` |
-| `HPE_TOOL_ROOT` | Compiler and SDK installations | `<checkout>/toolchain` |
+| `HPE_TOOL_ROOT` | Compiler and SDK installations | `<checkout>/build/toolchains` |
 | `HPE_INSTALL_ROOT` | Installed application package | `install/<RID>` |
 | `HPE_LOG_DIR` | Build workflow logs | `<HPE_BUILD_ROOT>/logs` |
 
@@ -88,7 +100,7 @@ In Windows Command Prompt, use Windows-style absolute paths and `set`:
 
 ```cmd
 set HPE_BUILD_ROOT=C:\hpe-data\build
-set HPE_TOOL_ROOT=C:\hpe-data\toolchain
+set HPE_TOOL_ROOT=C:\hpe-data\compiler-sdks
 set HPE_INSTALL_ROOT=C:\hpe-data\install
 set HPE_LOG_DIR=C:\hpe-data\logs
 bootstrap\bin\hpe-bootstrap-windows-x64.exe build
@@ -148,6 +160,20 @@ readreg 0x48 0x00 1
 
 Scenarios can create virtual devices, initialize registers or storage, issue protocol transactions, and exercise selected error paths. The installed example directory contains runnable scenarios for I2C, SPI, SD/eMMC, USB and PCIe.
 
+## Updating the bootstrap executables
+
+The checked-in native bootstrap executables let users build HPE without installing Go. When the bootstrap source or its pinned Go version changes, maintainers can rebuild all four Linux and Windows executables with the platform script. The script downloads the pinned Go 1.27.2 archive, verifies its SHA-256 digest, and keeps the compiler, downloaded archive, module cache and compiler cache under `build/`.
+
+```sh
+# Linux or another POSIX shell
+./scripts/update-bootstrap.sh
+```
+
+```cmd
+:: Windows Command Prompt
+scripts\update-bootstrap.bat
+```
+
 ## C API
 
 The public C API is declared in [`include/hpe/hpe.h`](include/hpe/hpe.h). Applications can create a simulation context, add virtual devices, run protocol-specific operations and inspect trace events. The opaque simulation context owns its devices and events until `hpe_sim_destroy`. Time is deterministic and virtual; API calls do not wait in real time. I2C devices can provide callbacks for register reads and writes.
@@ -172,8 +198,8 @@ tests/integration/     Integration tests
 assets/                Fonts and application artwork
 cmake/                 CMake toolchains and vcpkg configuration
 bootstrap/             Native Go build bootstrapper source and binaries
-third_party/           Upstream source submodules
-toolchain/             Downloaded compiler SDKs (generated; ignored by Git)
+scripts/               Maintainer scripts for rebuilding bootstrap binaries
+third_party/           Optional upstream source submodules
 build/                 Dependencies, caches and intermediate output (generated)
 install/<RID>/         User-facing application packages
 ```

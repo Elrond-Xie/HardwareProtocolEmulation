@@ -1,3 +1,7 @@
+# Project build entry point for the HPE simulator and bundled GUI.
+# Author: Elrond-Xie
+# Copyright (c) 2026 Elrond-Xie. SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0.
+
 cmake_minimum_required(VERSION 3.16)
 project(hpe VERSION 0.1.0 LANGUAGES C)
 

@@ -1,3 +1,8 @@
+# File: zig.cmake
+# Purpose: Configure the project-owned Zig compiler toolchain.
+# Author: Elrond-Xie
+# Copyright (c) 2026 Elrond-Xie. SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0.
+
 if(NOT DEFINED ENV{HPE_CC} OR NOT DEFINED ENV{HPE_CXX})
     message(FATAL_ERROR "Run the project build script so the local Zig toolchain is configured.")
 endif()

@@ -1,3 +1,8 @@
+# File: portfile.cmake
+# Purpose: Build and package the pinned Fontconfig dependency.
+# Author: Elrond-Xie
+# Copyright (c) 2026 Elrond-Xie. SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0.
+
 vcpkg_from_gitlab(
     GITLAB_URL https://gitlab.freedesktop.org
     OUT_SOURCE_PATH SOURCE_PATH

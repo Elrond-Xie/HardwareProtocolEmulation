@@ -1,3 +1,10 @@
+/*
+ * File: internal.h
+ * Purpose: Project-owned implementation and interface for src / engine / internal.h.
+ * Author: Elrond-Xie
+ * Copyright (c) 2026 Elrond-Xie. SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0.
+ */
+
 #ifndef HPE_INTERNAL_H
 #define HPE_INTERNAL_H
 
@@ -11,7 +18,8 @@ typedef struct hpe_card_page hpe_card_page_t;
 typedef struct hpe_usb_device hpe_usb_device_t;
 typedef struct hpe_pcie_endpoint hpe_pcie_endpoint_t;
 
-struct hpe_device {
+struct hpe_device
+{
     char name[48];
     uint8_t address;
     uint8_t *registers;
@@ -24,7 +32,8 @@ struct hpe_device {
     void *user_data;
 };
 
-struct hpe_i2c_bus {
+struct hpe_i2c_bus
+{
     hpe_device_t **devices;
     size_t count;
     size_t capacity;
@@ -40,7 +49,8 @@ struct hpe_i2c_bus {
     hpe_device_t *target;
 };
 
-struct hpe_spi_device {
+struct hpe_spi_device
+{
     char name[48];
     uint8_t chip_select;
     uint8_t *memory;
@@ -50,7 +60,8 @@ struct hpe_spi_device {
     uint8_t jedec_id[3];
 };
 
-typedef enum hpe_card_state {
+typedef enum hpe_card_state
+{
     HPE_CARD_IDLE = 0,
     HPE_CARD_READY,
     HPE_CARD_IDENTIFICATION,
@@ -58,7 +69,8 @@ typedef enum hpe_card_state {
     HPE_CARD_TRANSFER
 } hpe_card_state_t;
 
-struct hpe_block_card {
+struct hpe_block_card
+{
     char name[48];
     hpe_protocol_t protocol;
     hpe_card_state_t state;
@@ -83,19 +95,22 @@ struct hpe_block_card {
     uint8_t ext_csd[512];
 };
 
-struct hpe_card_page {
+struct hpe_card_page
+{
     uint32_t block;
     uint8_t data[512];
     hpe_card_page_t *next;
 };
 
-typedef enum hpe_usb_state {
+typedef enum hpe_usb_state
+{
     HPE_USB_DEFAULT = 0,
     HPE_USB_ADDRESSED,
     HPE_USB_CONFIGURED
 } hpe_usb_state_t;
 
-struct hpe_usb_device {
+struct hpe_usb_device
+{
     char name[48];
     char manufacturer[48];
     char product[48];
@@ -122,7 +137,8 @@ struct hpe_usb_device {
     size_t bulk_capacity;
 };
 
-struct hpe_pcie_endpoint {
+struct hpe_pcie_endpoint
+{
     char name[48];
     uint8_t bus, device, function;
     uint8_t max_generation, max_lanes, negotiated_generation, negotiated_lanes;
@@ -134,7 +150,8 @@ struct hpe_pcie_endpoint {
     uint8_t *bar0;
 };
 
-struct hpe_sim {
+struct hpe_sim
+{
     hpe_i2c_bus_t i2c;
     hpe_spi_device_t **spi_devices;
     size_t spi_count;
@@ -169,11 +186,11 @@ struct hpe_sim {
     size_t event_capacity;
 };
 
-void hpe_emit(hpe_sim_t *sim, hpe_event_kind_t kind, uint8_t value,
-              uint8_t read, const char *message);
+void hpe_emit(hpe_sim_t *sim, hpe_event_kind_t kind, uint8_t value, uint8_t read,
+              const char *message);
 hpe_device_t *hpe_find_device(hpe_sim_t *sim, uint8_t address);
 hpe_spi_device_t *hpe_find_spi_device(hpe_sim_t *sim, uint8_t chip_select);
-hpe_status_t hpe_block_card_read_memory(const hpe_sim_t *sim, size_t card_index,
-        uint32_t offset, uint8_t *data, size_t length);
+hpe_status_t hpe_block_card_read_memory(const hpe_sim_t *sim, size_t card_index, uint32_t offset,
+                                        uint8_t *data, size_t length);
 
 #endif

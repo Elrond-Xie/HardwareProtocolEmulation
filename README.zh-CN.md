@@ -20,7 +20,19 @@
 
 ## 构建
 
-HPE 为 Linux 和 Windows 提供原生构建引导程序。请在项目根目录（即包含 `README.md` 的目录）中运行以下命令。首次构建需要联网下载固定版本并通过 SHA-256 校验的工具链和依赖归档文件。无需预先安装编译器、Go、Python、.NET SDK、CMake、Ninja、Git 或包管理器。`build` 命令会自动下载并安装所需的本地构建工具；无需预先单独运行 `tools`。
+HPE 为 Linux 和 Windows 提供原生构建引导程序。请在项目根目录（即包含 `README.md` 的目录）中运行构建命令。首次构建需要联网下载固定版本并通过 SHA-256 校验的工具链和依赖归档文件。源码准备好之后，构建不要求预先安装编译器、Go、Python、.NET SDK、CMake、Ninja、Git 或包管理器。`build` 命令会自动下载并安装所需的本地构建工具；无需预先单独运行 `tools`。
+
+### 获取项目源码
+
+Linux 下使用 Git 克隆项目：
+
+```sh
+git clone https://github.com/Elrond-Xie/HardwareProtocolEmulation.git
+cd HardwareProtocolEmulation
+./bootstrap/bin/hpe-bootstrap-linux-x64 build
+```
+
+Windows 下可在[项目 GitHub 页面](https://github.com/Elrond-Xie/HardwareProtocolEmulation)点击 **Code → Download ZIP** 获取源码，再使用文件资源管理器解压。然后在解压后的项目目录打开**命令提示符**，执行下方 Windows 构建章节中的命令。该 ZIP 不含 Git 历史，更新时重新获取一份 ZIP 即可。无需自行查找或下载编译器 SDK、依赖包；引导程序会在构建期间自动下载并校验。Windows ARM64 请使用 `hpe-bootstrap-windows-arm64.exe`。
 
 ### Linux
 
@@ -62,7 +74,7 @@ bootstrap\bin\hpe-bootstrap-windows-x64.exe build
 
 `HPE_JOBS` 是可选项；默认使用检测到的 CPU 核心数。执行 `set HPE_JOBS=` 可在当前命令提示符会话中清除该设置。构建目标是当前主机的操作系统和架构；引导程序不会为其他平台交叉编译应用程序。
 
-引导程序会将编译器 SDK 下载到 Git 忽略的根目录 `toolchain/`。下载的构建工具、依赖源码、编译出的依赖和中间文件位于 `build/`。最终应用程序及运行文件输出到 `install/<RID>/`，例如 `install/linux-x64/` 或 `install/win-x64/`。构建支持增量编译，并会复用已校验的下载文件、CMake/Ninja 构建目录、ccache 条目、vcpkg 包和 NuGet 包。
+引导程序会将编译器 SDK 下载并解压到 `build/toolchains/`。下载的构建工具、依赖源码、编译出的依赖和中间文件位于 `build/`。最终应用程序及运行文件输出到 `install/<RID>/`，例如 `install/linux-x64/` 或 `install/win-x64/`。构建支持增量编译，并会复用已校验的下载文件、CMake/Ninja 构建目录、ccache 条目、vcpkg 包和 NuGet 包。Linux 主机已安装 Git 时，引导程序会浅层拉取固定提交的 vcpkg 和 ccache 源码，校验提交号后删除 Git 元数据；Git 不可用或拉取失败时，会自动下载并校验固定 SHA-256 的 tar.gz 归档。Windows 则由引导程序直接下载并校验 ZIP 归档，不需要 Git for Windows。其他依赖源码同样由引导程序在构建过程中自动获取并校验。
 
 默认使用检测到的全部 CPU 核心。可通过 `HPE_JOBS` 限制并行任务数，也可以设置以下路径：
 
@@ -70,7 +82,7 @@ bootstrap\bin\hpe-bootstrap-windows-x64.exe build
 | --- | --- | --- |
 | `HPE_JOBS` | 最大并行构建任务数 | 检测到的 CPU 核心数 |
 | `HPE_BUILD_ROOT` | 下载的构建工具、依赖、缓存和中间文件目录 | `<项目目录>/build` |
-| `HPE_TOOL_ROOT` | 编译器和 SDK 安装目录 | `<项目目录>/toolchain` |
+| `HPE_TOOL_ROOT` | 编译器和 SDK 安装目录 | `<项目目录>/build/toolchains` |
 | `HPE_INSTALL_ROOT` | 已安装的应用程序目录 | `install/<RID>` |
 | `HPE_LOG_DIR` | 构建流程日志目录 | `<HPE_BUILD_ROOT>/logs` |
 
@@ -88,7 +100,7 @@ export HPE_LOG_DIR="$PWD/build-logs"
 
 ```cmd
 set HPE_BUILD_ROOT=C:\hpe-data\build
-set HPE_TOOL_ROOT=C:\hpe-data\toolchain
+set HPE_TOOL_ROOT=C:\hpe-data\compiler-sdks
 set HPE_INSTALL_ROOT=C:\hpe-data\install
 set HPE_LOG_DIR=C:\hpe-data\logs
 bootstrap\bin\hpe-bootstrap-windows-x64.exe build
@@ -148,6 +160,20 @@ readreg 0x48 0x00 1
 
 场景可以创建虚拟设备、初始化寄存器或存储、执行协议事务，并触发部分异常路径。安装目录中的示例覆盖 I2C、SPI、SD/eMMC、USB 和 PCIe。
 
+## 更新构建引导程序
+
+仓库中已包含 Linux 和 Windows 的原生引导程序，普通构建无需安装 Go。只有引导程序源码或其 Go 版本更新时，维护者才需要重新生成四个平台的引导程序。更新脚本会下载固定版本 Go 1.27.2 并校验 SHA-256，编译器、下载归档、模块缓存和编译缓存均保存在 `build/` 下。
+
+```sh
+# Linux 或其他 POSIX shell
+./scripts/update-bootstrap.sh
+```
+
+```cmd
+:: Windows 命令提示符
+scripts\update-bootstrap.bat
+```
+
 ## C API
 
 公共 C API 声明位于 [`include/hpe/hpe.h`](include/hpe/hpe.h)。应用程序可以创建模拟上下文、添加虚拟设备、调用协议操作并查看跟踪事件。不透明模拟上下文会持有设备和事件，直到调用 `hpe_sim_destroy`。模拟时间是确定性的虚拟时间，API 调用不会等待现实时间。I2C 设备可以提供寄存器读写回调。
@@ -172,8 +198,8 @@ tests/integration/     集成测试
 assets/                字体和应用图稿
 cmake/                 CMake 工具链和 vcpkg 配置
 bootstrap/             原生 Go 构建引导程序源码和可执行文件
-third_party/           上游源码子模块
-toolchain/             下载的编译器 SDK（生成目录，已被 Git 忽略）
+scripts/               用于重新生成引导程序的维护脚本
+third_party/           可选的上游源码子模块
 build/                 依赖、缓存和构建中间文件（生成目录）
 install/<RID>/         面向用户的应用程序包
 ```

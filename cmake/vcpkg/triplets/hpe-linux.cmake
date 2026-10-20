@@ -1,3 +1,8 @@
+# File: hpe-linux.cmake
+# Purpose: Configure dependency builds for the Linux target.
+# Author: Elrond-Xie
+# Copyright (c) 2026 Elrond-Xie. SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0.
+
 if(DEFINED ENV{HPE_VCPKG_ARCH})
     set(VCPKG_TARGET_ARCHITECTURE "$ENV{HPE_VCPKG_ARCH}")
 else()
