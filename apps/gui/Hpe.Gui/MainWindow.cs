@@ -23,10 +23,13 @@ public sealed class main_window : Window
         new() { AcceptsReturn = true, FontFamily = new FontFamily("monospace"), MinHeight = 120,
                 TextWrapping = TextWrapping.NoWrap };
     private readonly waveform_view waveform = new();
+    private readonly ScrollViewer waveform_scroll;
     private readonly ListBox trace = new();
     private readonly TextBlock status = new();
     private readonly TextBlock cursor_status = new();
     private readonly TextBlock version_status = new() { Text = "HPE 0.1.0" };
+    private readonly FileStream? window_icon_stream;
+    private readonly WindowIcon? window_icon;
     private readonly List<native_api.native_event> events = new();
     private readonly List<native_api.native_event> trace_events = new();
     private readonly List<string> trace_rows = new();
@@ -46,6 +49,22 @@ public sealed class main_window : Window
         MinWidth = 860;
         MinHeight = 600;
         Background = Brushes.White;
+        string icon_path = find_install_asset("share", "icons", "hicolor", "256x256", "apps", "hpe.ico");
+        if (File.Exists(icon_path)) {
+            window_icon_stream = File.OpenRead(icon_path);
+            window_icon = new WindowIcon(window_icon_stream);
+            Icon = window_icon;
+        }
+        waveform_scroll = new ScrollViewer {
+            Content = waveform,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        };
+        waveform_scroll.SizeChanged += (_, e) =>
+        {
+            waveform.viewport_width = e.NewSize.Width;
+            waveform.InvalidateMeasure();
+        };
         examples.ItemsSource = new[] { "I2C basic", "SPI NOR flash", "SD / eMMC blocks",
                                        "USB 2.0 echo", "PCIe endpoint" };
         language.ItemsSource = new[] { "English", "简体中文" };
@@ -72,15 +91,8 @@ public sealed class main_window : Window
         DockPanel.SetDock(version_status, Dock.Right);
         foot_panel.Children.Add(version_status);
         foot_panel.Children.Add(status);
-        var split = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto,*"),
+        var split = new Grid { RowDefinitions = new RowDefinitions("Auto,3*,Auto,2*"),
                                ColumnDefinitions = new ColumnDefinitions("*") };
-        var editor_label = new TextBlock { Text = "Scenario", FontWeight = FontWeight.SemiBold,
-                                           Margin = new Thickness(2, 8, 0, 4) };
-        scenario_header = editor_label;
-        split.Children.Add(editor_label);
-        scenario.Text = load_example_file("i2c/i2c_basic.hpe");
-        Grid.SetRow(scenario, 1);
-        split.Children.Add(scenario);
         var wave_header =
             new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto"),
                        Margin = new Thickness(0, 12, 0, 4) };
@@ -110,6 +122,7 @@ public sealed class main_window : Window
             {
                 if (delta == 0) {
                     waveform.fit();
+                    waveform_scroll.Offset = Vector.Zero;
                 }
                 else {
                     waveform.zoom(delta);
@@ -118,20 +131,16 @@ public sealed class main_window : Window
             Grid.SetColumn(b, col);
             wave_header.Children.Add(b);
         }
-        Grid.SetRow(wave_header, 2);
+        Grid.SetRow(wave_header, 0);
         split.Children.Add(wave_header);
-        var lower = new Grid { ColumnDefinitions = new ColumnDefinitions("3*,2*"),
-                               RowDefinitions = new RowDefinitions("*") };
         waveform.events = events;
         waveform.cursor_changed += n =>
         {
             cursor_ns = n;
             cursor_status.Text = $"Cursor {n} ns";
         };
-        lower.Children.Add(
-            new ScrollViewer { Content = waveform,
-                               VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                               HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
+        Grid.SetRow(waveform_scroll, 1);
+        split.Children.Add(waveform_scroll);
         trace.ItemsSource = trace_rows;
         trace.SelectionChanged += (_, _) =>
         {
@@ -142,16 +151,25 @@ public sealed class main_window : Window
                 cursor_status.Text = $"Cursor {cursor_ns} ns";
             }
         };
-        var trace_pane = new DockPanel { Margin = new Thickness(8, 0, 0, 0) };
-        var th = new TextBlock { Text = "Decoded events", FontWeight = FontWeight.SemiBold,
-                                 Margin = new Thickness(0, 0, 0, 4) };
-        DockPanel.SetDock(th, Dock.Top);
-        trace_pane.Children.Add(th);
-        trace_pane.Children.Add(trace);
-        Grid.SetColumn(trace_pane, 1);
-        lower.Children.Add(trace_pane);
-        Grid.SetRow(lower, 3);
-        split.Children.Add(lower);
+        var bottom_header = new Grid { ColumnDefinitions = new ColumnDefinitions("3*,2*"),
+                                       Margin = new Thickness(0, 12, 0, 4) };
+        scenario_header = new TextBlock { Text = "Scenario", FontWeight = FontWeight.SemiBold,
+                                          Margin = new Thickness(2, 0, 0, 0) };
+        bottom_header.Children.Add(scenario_header);
+        var trace_header = new TextBlock { Text = "Decoded events", FontWeight = FontWeight.SemiBold,
+                                           Margin = new Thickness(10, 0, 0, 0) };
+        Grid.SetColumn(trace_header, 1);
+        bottom_header.Children.Add(trace_header);
+        Grid.SetRow(bottom_header, 2);
+        split.Children.Add(bottom_header);
+        var bottom = new Grid { ColumnDefinitions = new ColumnDefinitions("3*,2*"),
+                                ColumnSpacing = 10 };
+        scenario.Text = load_example_file("i2c/i2c_basic.hpe");
+        bottom.Children.Add(scenario);
+        Grid.SetColumn(trace, 1);
+        bottom.Children.Add(trace);
+        Grid.SetRow(bottom, 3);
+        split.Children.Add(bottom);
         root.Children.Add(split);
         Content = root;
         update_language();
@@ -288,8 +306,18 @@ public sealed class main_window : Window
     /// <summary>Performs the load example file operation.</summary>
     private string load_example_file(string name)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "examples", name);
+        var path = find_install_asset("examples", name);
         return File.Exists(path) ? File.ReadAllText(path) : "";
+    }
+    /// <summary>Resolves a shared asset beside the platform-specific application directory.</summary>
+    private static string find_install_asset(params string[] parts)
+    {
+        string direct_path = Path.Combine(new[] { AppContext.BaseDirectory }.Concat(parts).ToArray());
+        if (File.Exists(direct_path)) {
+            return direct_path;
+        }
+        return Path.GetFullPath(Path.Combine(new[] { AppContext.BaseDirectory, ".." }
+                                                 .Concat(parts).ToArray()));
     }
     /// <summary>Performs the load selected example operation.</summary>
     private void load_selected_example()
@@ -333,6 +361,7 @@ public sealed class main_window : Window
         waveform.events = events;
         waveform.cursor_ns = events.Count == 0 ? 0 : (long)events[0].time;
         waveform.fit();
+        waveform_scroll.Offset = Vector.Zero;
         update_status();
     }
     /// <summary>Performs the kind operation.</summary>
@@ -361,6 +390,8 @@ public sealed class main_window : Window
         trace_events.Clear();
         trace.ItemsSource = Array.Empty<string>();
         waveform.events = events;
+        waveform_scroll.Offset = Vector.Zero;
+        waveform.InvalidateMeasure();
         waveform.InvalidateVisual();
         scenario.Clear();
         update_status();
@@ -573,6 +604,7 @@ public sealed class main_window : Window
                                "usb/usb2_echo.hpe", "pcie/pcie_basic.hpe" };
             int[] protocols = { 1, 2, 3, 5, 6 };
             record("SMOKE START");
+            check(Icon != null, "window icon loaded from install share directory");
             for (int i = 0; i < files.Length; i++) {
                 record($"START {files[i]}");
                 scenario.Text = load_example_file(files[i]);
@@ -636,6 +668,7 @@ internal sealed class waveform_view : Control
     /// <summary>Reports changes to the selected waveform cursor position.</summary>
     public Action<long>? cursor_changed { get; set; }
     private double scale = 0.025, offset;
+    public double viewport_width { get; set; } = 900;
     private Point? pan;
     private static readonly IBrush[] channel_colors = {
         Brush.Parse("#007AFF"), Brush.Parse("#34C759"), Brush.Parse("#FF9500"),
@@ -647,11 +680,21 @@ internal sealed class waveform_view : Control
     public waveform_view()
     {
         ClipToBounds = true;
-        MinHeight = 410;
         PointerPressed += handle_pointer_pressed;
         PointerMoved += handle_pointer_moved;
         PointerReleased += handle_pointer_released;
         PointerWheelChanged += handle_wheel;
+    }
+    /// <summary>Measures the waveform extent so both axes can scroll through dense traces.</summary>
+    protected override Size MeasureOverride(Size availableSize)
+    {
+        double visible_width = viewport_width > 0 && double.IsFinite(viewport_width)
+                                   ? viewport_width
+                                   : 900;
+        double last_time = events.Count == 0 ? 0 : (long)events[^1].time;
+        double content_width = Math.Max(visible_width, 78 + last_time * scale + 22);
+        double content_height = Math.Max(320, 36 + channels().Count * 44);
+        return new Size(content_width, content_height);
     }
     /// <summary>Performs the Render operation.</summary>
     public override void Render(DrawingContext c)
@@ -662,7 +705,7 @@ internal sealed class waveform_view : Control
         c.DrawRectangle(null, new Pen(Brush.Parse("#D9DDE3")), b);
         var ch = channels();
         var data_events = events.Where(e => e.kind is 5 or 10 or 11).ToArray();
-        double top = 26, row = 38;
+        double top = 30, row = 44;
         using (c.PushClip(new Rect(0, 0, b.Width, b.Height)))
         {
             for (int x = 78; x < b.Width; x += 100) {
@@ -790,8 +833,9 @@ internal sealed class waveform_view : Control
     {
         double x = anchor_x ?? Bounds.Width / 2;
         double time = (x - 78 + offset) / scale;
-        scale = Math.Clamp(scale * (d > 0 ? 1.35 : 1 / 1.35), 0.002, 3);
+        scale = Math.Clamp(scale * (d > 0 ? 1.35 : 1 / 1.35), 0.000001, 3);
         offset = Math.Max(0, time * scale - (x - 78));
+        InvalidateMeasure();
         InvalidateVisual();
     }
     /// <summary>Performs the fit operation.</summary>
@@ -800,8 +844,9 @@ internal sealed class waveform_view : Control
         offset = 0;
         if (events.Count > 0) {
             long max = (long)events[^1].time;
-            scale = Math.Clamp((Bounds.Width - 100) / Math.Max(1, max), 0.002, 3);
+            scale = Math.Clamp((viewport_width - 100) / Math.Max(1, max), 0.000001, 3);
         }
+        InvalidateMeasure();
         InvalidateVisual();
     }
     /// <summary>Performs the handle wheel operation.</summary>

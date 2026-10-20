@@ -1,0 +1,17 @@
+<!--
+  File: hpe-icon.svg
+  Purpose: Application icon source for the HPE desktop GUI.
+  Author: Elrond-Xie
+  Copyright (c) 2026 Elrond-Xie. SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Hardware Protocol Emulation</title>
+  <desc>A chip with a digital protocol waveform.</desc>
+  <rect width="256" height="256" rx="48" fill="#101828"/>
+  <g fill="#20364f" stroke="#83dcff" stroke-width="8">
+    <rect x="58" y="58" width="140" height="140" rx="24"/>
+    <path d="M92 38v20M128 38v20M164 38v20M92 198v20M128 198v20M164 198v20M38 92h20M38 128h20M38 164h20M198 92h20M198 128h20M198 164h20" stroke-linecap="round"/>
+  </g>
+  <path d="M78 130h23l11-34 20 67 16-48 11 15h19" fill="none" stroke="#f8fafc" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="178" cy="130" r="7" fill="#52e0b5"/>
+</svg>

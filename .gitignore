@@ -9,7 +9,11 @@
 !/bootstrap/bin/
 !/bootstrap/bin/*
 !/bootstrap/bin/*.exe
+!/apps/gui/launcher/bin/
+!/apps/gui/launcher/bin/*/
+!/apps/gui/launcher/bin/*/*.exe
 *.obj
+*.syso
 *.pdb
 *.ilk
 *.log

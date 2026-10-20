@@ -140,7 +140,7 @@ bootstrap\bin\hpe-bootstrap-windows-x64.exe distclean
 ./install/linux-x64/hpe-gui
 ```
 
-Windows 对应程序为 `install\win-x64\hpe-cli.exe` 和 `install\win-x64\hpe-gui.cmd`（ARM64 使用 `win-arm64`）。所有支持协议的示例场景都安装在 `install/<RID>/examples/` 下。
+Windows 下运行 `install\win-x64\hpe-cli.exe` 或 `install\win-x64\hpe-gui.exe`（ARM64 使用 `win-arm64`）。所有协议示例只安装一份，位于 `install/<RID>/examples/`；共享运行库位于 `install/<RID>/lib/`。
 
 CLI 会输出解码后的事件和设备结果。可选的跟踪文件会记录带有虚拟时间戳的协议事件。GUI 提供场景选择和运行、解码事件列表、可缩放和平移的时序图、可移动光标、可选进制的信号值（二进制、八进制、十进制和十六进制）、英文与简体中文设置，以及虚拟设备寄存器和内存的实时查看。
 
@@ -187,6 +187,7 @@ scripts\update-bootstrap.bat
 ```text
 apps/cli/              C 命令行程序
 apps/gui/Hpe.Gui/      Avalonia 桌面应用
+apps/gui/launcher/     GUI 运行时启动器源码和各平台启动器
 adapters/gui-c-api/    GUI 使用的 C API 桥接层
 include/hpe/           公共 C API
 src/                   模拟引擎、设备和场景运行器
@@ -196,7 +197,7 @@ tests/integration/     集成测试
 assets/                字体和应用图稿
 cmake/                 CMake 工具链和 vcpkg 配置
 bootstrap/             原生 Go 构建引导程序源码和可执行文件
-scripts/               用于重新生成引导程序的维护脚本
+scripts/               用于重新生成构建工具和 GUI 启动器的维护脚本
 third_party/           可选的上游源码子模块
 build/                 依赖、缓存和构建中间文件（生成目录）
 install/<RID>/         面向用户的应用程序包

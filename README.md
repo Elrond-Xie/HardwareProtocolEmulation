@@ -140,7 +140,7 @@ After building, run the CLI or GUI from the platform-specific installation direc
 ./install/linux-x64/hpe-gui
 ```
 
-On Windows, the corresponding applications are `install\win-x64\hpe-cli.exe` and `install\win-x64\hpe-gui.cmd` (use `win-arm64` on ARM64). Example scenarios for all supported protocols are installed under `install/<RID>/examples/`.
+On Windows, launch `install\win-x64\hpe-cli.exe` or `install\win-x64\hpe-gui.exe` (use `win-arm64` on ARM64). Example scenarios for all supported protocols are installed once under `install/<RID>/examples/`; shared runtime libraries are under `install/<RID>/lib/`.
 
 The CLI prints decoded events and device results. An optional trace file records protocol events with virtual timestamps. The GUI provides scenario selection and execution, decoded-event records, a zoomable and pannable timing view, a movable cursor, selectable signal-value radices (binary, octal, decimal and hexadecimal), English and Simplified Chinese language settings, and live virtual-device register and memory inspection.
 
@@ -187,6 +187,7 @@ Third-party components, submodules, fonts and downloaded dependencies retain the
 ```text
 apps/cli/              C command-line application
 apps/gui/Hpe.Gui/      Avalonia desktop application
+apps/gui/launcher/     GUI runtime launchers and platform-specific binaries
 adapters/gui-c-api/    C API bridge used by the GUI
 include/hpe/           Public C API
 src/                   Simulation engine, devices and scenario runner
@@ -196,7 +197,7 @@ tests/integration/     Integration tests
 assets/                Fonts and application artwork
 cmake/                 CMake toolchains and vcpkg configuration
 bootstrap/             Native Go build bootstrapper source and binaries
-scripts/               Maintainer scripts for rebuilding bootstrap binaries
+scripts/               Maintainer scripts for rebuilding bootstrap tools and GUI launchers
 third_party/           Optional upstream source submodules
 build/                 Dependencies, caches and intermediate output (generated)
 install/<RID>/         User-facing application packages

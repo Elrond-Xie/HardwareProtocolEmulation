@@ -3,6 +3,7 @@
 // Author: Elrond-Xie
 // Copyright (c) 2026 Elrond-Xie. SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0.
 
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -12,6 +13,51 @@ namespace hpe.gui;
 internal static unsafe class native_api
 {
     private const string dll_name = "hpe_gui_bridge";
+    private static IntPtr native_search_cookie;
+
+    /// <summary>Registers the platform-specific resolver for the bundled native bridge.</summary>
+    static native_api()
+    {
+        NativeLibrary.SetDllImportResolver(typeof(native_api).Assembly,
+                                           resolve_library);
+    }
+
+    /// <summary>Resolves the native bridge from the shared library directory.</summary>
+    private static IntPtr resolve_library(string name, Assembly assembly,
+                                          DllImportSearchPath? search_path)
+    {
+        if (name != dll_name) {
+            return IntPtr.Zero;
+        }
+        string[] library_names = OperatingSystem.IsWindows()
+                                     ? new[] { "libhpe_gui_bridge.dll", "hpe_gui_bridge.dll" }
+                                     : new[] { "libhpe_gui_bridge.so" };
+        string[] directories = {
+            Path.Combine(AppContext.BaseDirectory, "lib"),
+            AppContext.BaseDirectory,
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "lib"))
+        };
+        if (OperatingSystem.IsWindows() && native_search_cookie == IntPtr.Zero) {
+            native_search_cookie = add_dll_directory(directories[0]);
+            if (native_search_cookie == IntPtr.Zero) {
+                native_search_cookie = add_dll_directory(directories[2]);
+            }
+        }
+        foreach (string directory in directories) {
+            foreach (string library_name in library_names) {
+                string path = Path.Combine(directory, library_name);
+                if (File.Exists(path)) {
+                    return NativeLibrary.Load(path);
+                }
+            }
+        }
+        return IntPtr.Zero;
+    }
+
+    /// <summary>Adds a directory to the Windows native library search path.</summary>
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "AddDllDirectory")]
+    private static extern IntPtr add_dll_directory(string directory);
+
     /// <summary>Represents the native event type.</summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct native_event

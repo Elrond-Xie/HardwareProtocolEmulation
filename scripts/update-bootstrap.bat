@@ -1,6 +1,6 @@
 @echo off
 rem File: update-bootstrap.bat
-rem Purpose: Rebuild the checked-in Linux and Windows bootstrap executables.
+rem Purpose: Rebuild the checked-in bootstrap tools and GUI runtime launchers.
 rem Author: Elrond-Xie
 rem Copyright (c) 2026 Elrond-Xie. SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0.
 
@@ -8,6 +8,7 @@ setlocal EnableExtensions
 set "SCRIPT_DIRECTORY=%~dp0"
 for %%I in ("%SCRIPT_DIRECTORY%..") do set "PROJECT_ROOT=%%~fI"
 set "BOOTSTRAP_DIRECTORY=%PROJECT_ROOT%\bootstrap"
+set "LAUNCHER_DIRECTORY=%PROJECT_ROOT%\apps\gui\launcher"
 if not defined HPE_BUILD_ROOT set "HPE_BUILD_ROOT=%PROJECT_ROOT%\build"
 for %%I in ("%HPE_BUILD_ROOT%") do set "HPE_BUILD_ROOT=%%~fI"
 set "GO_VERSION=1.27.2"
@@ -67,9 +68,22 @@ call :build_bootstrap windows amd64 hpe-bootstrap-windows-x64.exe
 if errorlevel 1 goto :failed
 call :build_bootstrap windows arm64 hpe-bootstrap-windows-arm64.exe
 if errorlevel 1 goto :failed
-
+popd
+pushd "%LAUNCHER_DIRECTORY%"
+if errorlevel 1 exit /b 1
+"%GO_BINARY%" mod download
+if errorlevel 1 goto :failed
+call :build_gui_launcher linux amd64 linux-x64 hpe-gui
+if errorlevel 1 goto :failed
+call :build_gui_launcher linux arm64 linux-arm64 hpe-gui
+if errorlevel 1 goto :failed
+call :build_gui_launcher windows amd64 win-x64 hpe-gui.exe
+if errorlevel 1 goto :failed
+call :build_gui_launcher windows arm64 win-arm64 hpe-gui.exe
+if errorlevel 1 goto :failed
 popd
 echo Bootstrap executables updated in "%BOOTSTRAP_DIRECTORY%\bin".
+echo GUI launchers updated in "%LAUNCHER_DIRECTORY%\bin".
 exit /b 0
 
 :download_go
@@ -129,6 +143,28 @@ set "CGO_ENABLED=0"
 set "GOOS=%1"
 set "GOARCH=%2"
 "%GO_BINARY%" build -trimpath -ldflags="-s -w" -o "%BOOTSTRAP_DIRECTORY%\bin\%3" .
+exit /b %errorlevel%
+
+:build_gui_launcher
+if /I "%1"=="windows" goto :build_windows_gui_launcher
+echo Building %1/%2 GUI launcher: %3
+set "CGO_ENABLED=0"
+set "GOOS=%1"
+set "GOARCH=%2"
+"%GO_BINARY%" build -trimpath -ldflags="-s -w" -o "%LAUNCHER_DIRECTORY%\bin\%3\%4" .
+exit /b %errorlevel%
+
+:build_windows_gui_launcher
+echo Embedding the Windows application icon for %3
+set "GOOS=windows"
+set "GOARCH=%GO_ARCH%"
+"%GO_BINARY%" run github.com/akavel/rsrc -ico "%PROJECT_ROOT%\apps\gui\Hpe.Gui\Assets\hpe-icon.ico" -arch %2 -o "rsrc_windows_%2.syso"
+if errorlevel 1 exit /b %errorlevel%
+echo Building windows/%2 GUI launcher: %3
+set "CGO_ENABLED=0"
+set "GOOS=windows"
+set "GOARCH=%2"
+"%GO_BINARY%" build -trimpath -ldflags="-s -w -H=windowsgui" -o "%LAUNCHER_DIRECTORY%\bin\%3\%4" .
 exit /b %errorlevel%
 
 :failed

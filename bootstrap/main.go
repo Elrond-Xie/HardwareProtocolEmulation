@@ -16,14 +16,12 @@ import (
 	"debug/elf"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -185,9 +183,6 @@ func main() {
 	if name == "git" {
 		os.Exit(run_git_version_shim(os.Args[1:]))
 	}
-	if name == "hpe-gui" && runtime.GOOS == "linux" {
-		os.Exit(run_linux_gui_launcher(os.Args[1:]))
-	}
 	if strings.HasPrefix(name, "hpe-zig-") {
 		os.Exit(run_zig_tool(strings.TrimPrefix(name, "hpe-zig-"), os.Args[1:]))
 	}
@@ -296,7 +291,7 @@ func prepare_managed_roots(paths layout) error {
 	if err := validate_disjoint_generated_paths(managed_roots...); err != nil {
 		return err
 	}
-	build_entries := []string{"logs", "downloads", "tools", "toolchains", "bootstrap-toolchain", "bootstrap-go-cache", "bootstrap-mod-cache", "projects", "ccache-build", "ccache-source", "ccache-cache", "vcpkg-root", "vcpkg-downloads", "host-tools", "manifests", "nuget-packages", "nuget-http-cache"}
+	build_entries := []string{"logs", "downloads", "tools", "toolchains", "bootstrap-toolchain", "bootstrap-go-cache", "bootstrap-mod-cache", "projects", "ccache-build", "ccache-source", "ccache-cache", "vcpkg-root", "vcpkg-downloads", "host-tools", "manifests", "nuget-packages", "nuget-http-cache", "gui-publish", "gui-framework-publish"}
 	if log_entry, in_build_root, err := build_log_root_entry(paths); err != nil {
 		return err
 	} else if in_build_root && log_entry != "." {
@@ -314,7 +309,7 @@ func prepare_managed_roots(paths layout) error {
 		return nil
 	}
 	return prepare_managed_root(paths.root, custom_install, default_install, ".hpe-install-root",
-		[]string{"gui", "lib", "examples", "hpe-cli", "hpe-cli.exe", "hpe-gui", "hpe-gui.cmd", "hpe_core.dll", "hpe_gui_bridge.dll"})
+		[]string{"gui", "lib", "examples", "share", "hpe-cli", "hpe-cli.exe", "hpe-gui", "hpe-gui.exe", "hpe-gui.cmd", "hpe_core.dll", "hpe_gui_bridge.dll"})
 }
 
 // build_log_directory implements the build log directory operation.
@@ -1743,16 +1738,36 @@ func bootstrap_vcpkg(root string) error {
 
 // patch_ccache implements the patch ccache operation.
 func patch_ccache(source string) error {
-	path := filepath.Join(source, "CMakeLists.txt")
-	data, err := os.ReadFile(path)
+	cmake_path := filepath.Join(source, "CMakeLists.txt")
+	cmake_data, err := os.ReadFile(cmake_path)
 	if err != nil {
 		return err
 	}
-	updated := strings.Replace(string(data), "project(ccache LANGUAGES C CXX ASM ASM_MASM)", "project(ccache LANGUAGES C CXX ASM)", 1)
-	if updated == string(data) && !strings.Contains(updated, "project(ccache LANGUAGES C CXX ASM)") {
+	cmake_source := string(cmake_data)
+	cmake_updated := strings.Replace(cmake_source, "project(ccache LANGUAGES C CXX ASM ASM_MASM)", "project(ccache LANGUAGES C CXX ASM)", 1)
+	if cmake_updated == cmake_source && !strings.Contains(cmake_updated, "project(ccache LANGUAGES C CXX ASM)") {
 		return errors.New("ccache CMake project declaration has changed; update the local patch")
 	}
-	return os.WriteFile(path, []byte(updated), 0o644)
+	if err := os.WriteFile(cmake_path, []byte(cmake_updated), 0o644); err != nil {
+		return err
+	}
+
+	fmt_path := filepath.Join(source, "src", "third_party", "fmt", "ostream.h")
+	fmt_data, err := os.ReadFile(fmt_path)
+	if err != nil {
+		return err
+	}
+	fmt_source := string(fmt_data)
+	unsupported_libcpp_condition := "#elif defined(_WIN32) && defined(_LIBCPP_VERSION)"
+	supported_libcpp_condition := "#elif defined(_WIN32) && defined(_LIBCPP_VERSION) && __has_include(<__std_stream>)"
+	if strings.Count(fmt_source, unsupported_libcpp_condition) != 3 {
+		return errors.New("ccache fmt libc++ compatibility branches changed; update the local patch")
+	}
+	fmt_updated := strings.ReplaceAll(fmt_source, unsupported_libcpp_condition, supported_libcpp_condition)
+	if strings.Count(fmt_updated, supported_libcpp_condition) != 3 {
+		return errors.New("ccache fmt libc++ compatibility patch is incomplete; inspect ostream.h")
+	}
+	return os.WriteFile(fmt_path, []byte(fmt_updated), 0o644)
 }
 
 // prepare_filesystem_registry implements the prepare filesystem registry operation.
@@ -1850,8 +1865,10 @@ func compiler_environment(paths layout, zig, ccache, python string) map[string]s
 	env := map[string]string{"HPE_ZIG": zig, "CCACHE_DIR": filepath.Join(paths.build, "ccache-cache"),
 		"CCACHE_BASEDIR": paths.root, "CCACHE_COMPILERCHECK": "content", "VCPKG_DISABLE_METRICS": "1",
 		"VCPKG_DOWNLOADS": filepath.Join(paths.build, "vcpkg-downloads"), "VCPKG_BINARY_SOURCES": "clear",
-		"HPE_VCPKG_ROOT":        filepath.Join(paths.build, "vcpkg-root"),
-		"VCPKG_MAX_CONCURRENCY": build_jobs(), "PATH": local_build_path(paths)}
+		// vcpkg must use the verified tools that the bootstrapper placed first on PATH.
+		"VCPKG_FORCE_SYSTEM_BINARIES": "1",
+		"HPE_VCPKG_ROOT":              filepath.Join(paths.build, "vcpkg-root"),
+		"VCPKG_MAX_CONCURRENCY":       build_jobs(), "PATH": local_build_path(paths)}
 	if ccache != "" {
 		env["HPE_CCACHE"] = ccache
 	}
@@ -2477,24 +2494,34 @@ func configure_build_install(paths layout, cmake, ninja, zig, dotnet, ccache str
 			return err
 		}
 	}
-	if err := run_step("Incrementally publish the self-contained desktop GUI", func() error {
+	if err := run_step("Incrementally publish GUI assemblies and bundle the private .NET runtime", func() error {
 		return publish_gui(paths, dotnet, install_root, rid, jobs)
 	}); err != nil {
 		return err
 	}
 	if err := run_step("Copy protocol examples and bundled fonts", func() error {
-		if err := copy_directory(filepath.Join(paths.root, "examples"), filepath.Join(install_root, "gui", "examples")); err != nil {
+		if err := copy_directory(filepath.Join(paths.root, "examples"), filepath.Join(install_root, "examples")); err != nil {
 			return err
 		}
-		return copy_directory(filepath.Join(paths.root, "assets", "fonts"), filepath.Join(install_root, "lib", "fonts"))
+		if err := copy_directory(filepath.Join(paths.root, "assets", "fonts"), filepath.Join(install_root, "lib", "fonts")); err != nil {
+			return err
+		}
+		icon_dir := filepath.Join(install_root, "share", "icons", "hicolor", "256x256", "apps")
+		if err := os.MkdirAll(icon_dir, 0o755); err != nil {
+			return err
+		}
+		asset_dir := filepath.Join(paths.root, "apps", "gui", "Hpe.Gui", "Assets")
+		if err := copy_file(filepath.Join(asset_dir, "hpe-icon.png"), filepath.Join(icon_dir, "hpe.png"), 0o644); err != nil {
+			return err
+		}
+		return copy_file(filepath.Join(asset_dir, "hpe-icon.ico"), filepath.Join(icon_dir, "hpe.ico"), 0o644)
 	}); err != nil {
 		return err
 	}
 	if runtime.GOOS == "linux" {
-		return run_step("Write Linux GUI launcher", func() error { return write_linux_launcher(install_root) })
+		return run_step("Write Linux GUI launcher", func() error { return write_linux_launcher(paths, install_root) })
 	}
-	launcher := []byte("@echo off\r\nset ROOT=%~dp0\r\n\"%ROOT%gui\\hpe-gui.exe\" %*\r\n")
-	return run_step("Write Windows GUI launcher", func() error { return os.WriteFile(filepath.Join(install_root, "hpe-gui.cmd"), launcher, 0o644) })
+	return run_step("Write Windows GUI launcher", func() error { return write_windows_gui_launcher(paths, install_root) })
 }
 
 // host_runtime_id implements the host runtime id operation.
@@ -2572,7 +2599,10 @@ func bundle_linux_runtime(zig, install_root string) error {
 
 // publish_gui implements the publish gui operation.
 func publish_gui(paths layout, dotnet, install_root, rid, jobs string) error {
-	gui_out := filepath.Join(install_root, "gui")
+	gui_out := filepath.Join(paths.build, "gui-framework-publish", rid)
+	if err := os.MkdirAll(gui_out, 0o755); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Join(paths.build, "nuget-packages"), 0o755); err != nil {
 		return err
 	}
@@ -2583,96 +2613,85 @@ func publish_gui(paths layout, dotnet, install_root, rid, jobs string) error {
 		"NUGET_HTTP_CACHE_PATH":       filepath.Join(paths.build, "nuget-http-cache"),
 		"DOTNET_CLI_TELEMETRY_OPTOUT": "1", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1"}
 	project := filepath.Join(paths.root, "apps", "gui", "Hpe.Gui", "Hpe.Gui.csproj")
-	args := []string{"publish", project, "-c", "Release", "-r", rid, "--self-contained", "true",
-		"-m:" + jobs, "-p:PublishSingleFile=false", "-p:PublishTrimmed=false", "-o", gui_out}
+	args := []string{"publish", project, "-c", "Release", "-r", rid, "--self-contained", "false",
+		"-m:" + jobs, "-p:UseAppHost=false", "-p:PublishSingleFile=false",
+		"-p:PublishTrimmed=false", "-o", gui_out}
 	if err := run_command(paths.root, env, dotnet, args...); err != nil {
 		return err
 	}
-	fontdir := filepath.Join(gui_out, "fonts")
-	if err := os.RemoveAll(fontdir); err != nil {
+	if err := filepath.WalkDir(gui_out, func(path string, entry os.DirEntry, walk_err error) error {
+		if walk_err != nil {
+			return walk_err
+		}
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(path), ".pdb") {
+			return os.Remove(path)
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
-	return nil
+	lib := filepath.Join(install_root, "lib")
+	if err := copy_directory(gui_out, lib); err != nil {
+		return err
+	}
+	return bundle_dotnet_runtime(dotnet, lib)
+}
+
+// bundle_dotnet_runtime implements the bundle dotnet runtime operation.
+func bundle_dotnet_runtime(dotnet, lib string) error {
+	sdk_root := filepath.Dir(dotnet)
+	dotnet_name := "dotnet"
+	if runtime.GOOS == "windows" {
+		dotnet_name += ".exe"
+	}
+	if err := copy_file(filepath.Join(sdk_root, dotnet_name), filepath.Join(lib, dotnet_name), 0o755); err != nil {
+		return err
+	}
+	if err := copy_directory(filepath.Join(sdk_root, "host", "fxr"), filepath.Join(lib, "host", "fxr")); err != nil {
+		return err
+	}
+	runtime_root := filepath.Join(sdk_root, "shared", "Microsoft.NETCore.App")
+	runtime_entries, err := os.ReadDir(runtime_root)
+	if err != nil {
+		return err
+	}
+	var runtime_versions []string
+	for _, entry := range runtime_entries {
+		if entry.IsDir() {
+			runtime_versions = append(runtime_versions, entry.Name())
+		}
+	}
+	if len(runtime_versions) == 0 {
+		return fmt.Errorf("no bundled Microsoft.NETCore.App runtime found under %s", runtime_root)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(runtime_versions)))
+	runtime_version := runtime_versions[0]
+	return copy_directory(filepath.Join(runtime_root, runtime_version),
+		filepath.Join(lib, "shared", "Microsoft.NETCore.App", runtime_version))
 }
 
 // write_linux_launcher implements the write linux launcher operation.
-func write_linux_launcher(install_root string) error {
+func write_linux_launcher(paths layout, install_root string) error {
 	path := filepath.Join(install_root, "hpe-gui")
-	executable, err := os.Executable()
-	if err != nil {
+	launcher := filepath.Join("apps", "gui", "launcher", "bin", host_runtime_id(), "hpe-gui")
+	if err := copy_file(filepath.Join(paths.root, launcher), path, 0o755); err != nil {
 		return err
 	}
-	return copy_file(executable, path, 0o755)
+	icon_path := filepath.Join(install_root, "share", "icons", "hicolor", "256x256", "apps", "hpe.png")
+	application_dir := filepath.Join(install_root, "share", "applications")
+	if err := os.MkdirAll(application_dir, 0o755); err != nil {
+		return err
+	}
+	quoted_executable := strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "$", "\\$", "`", "\\`").Replace(path)
+	icon_value := strings.NewReplacer("\\", "\\\\", " ", "\\s").Replace(filepath.ToSlash(icon_path))
+	entry := fmt.Sprintf("[Desktop Entry]\nVersion=1.0\nType=Application\nName=HPE\nComment=Hardware protocol simulator and learning tool\nExec=\"%s\"\nIcon=%s\nTerminal=false\nCategories=Development;Electronics;\nStartupWMClass=hpe-gui\n", quoted_executable, icon_value)
+	return os.WriteFile(filepath.Join(application_dir, "hpe-gui.desktop"), []byte(entry), 0o644)
 }
 
-// run_linux_gui_launcher implements the run linux gui launcher operation.
-func run_linux_gui_launcher(args []string) int {
-	executable, err := os.Executable()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	root := filepath.Dir(executable)
-	library_path := filepath.Join(root, "lib") + string(os.PathListSeparator) + filepath.Join(root, "gui")
-	if inherited := os.Getenv("LD_LIBRARY_PATH"); inherited != "" {
-		library_path += string(os.PathListSeparator) + inherited
-	}
-	if err := os.Setenv("LD_LIBRARY_PATH", library_path); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	user_id := "default"
-	if current_user, err := user.Current(); err == nil && current_user.Uid != "" {
-		user_id = current_user.Uid
-	}
-	cache_dir := filepath.Join(os.TempDir(), "hpe-fontconfig-cache-"+user_id)
-	if err := os.MkdirAll(cache_dir, 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	var escaped_root bytes.Buffer
-	if err := xml.EscapeText(&escaped_root, []byte(filepath.Join(root, "lib", "fonts"))); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	var escaped_cache bytes.Buffer
-	if err := xml.EscapeText(&escaped_cache, []byte(cache_dir)); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	font_config := fmt.Sprintf("<fontconfig><dir>%s</dir><cachedir>%s</cachedir><alias><family>sans-serif</family><prefer><family>DejaVu Sans</family><family>Noto Sans SC</family></prefer></alias><alias><family>monospace</family><prefer><family>DejaVu Sans</family></prefer></alias></fontconfig>\n", escaped_root.String(), escaped_cache.String())
-	config_file, err := os.CreateTemp(os.TempDir(), "hpe-fontconfig-*.conf")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	config_path := config_file.Name()
-	defer os.Remove(config_path)
-	if _, err := config_file.WriteString(font_config); err != nil {
-		_ = config_file.Close()
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	if err := config_file.Close(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	if err := os.Setenv("FONTCONFIG_FILE", config_path); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	gui := filepath.Join(root, "gui", "hpe-gui")
-	command := exec.Command(gui, args...)
-	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := command.Run(); err != nil {
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() >= 0 {
-			return exit.ExitCode()
-		}
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	return 0
+// write_windows_gui_launcher writes the Windows GUI entry executable.
+func write_windows_gui_launcher(paths layout, install_root string) error {
+	source := filepath.Join(paths.root, "apps", "gui", "launcher", "bin", host_runtime_id(), "hpe-gui.exe")
+	return copy_file(source, filepath.Join(install_root, "hpe-gui.exe"), 0o755)
 }
 
 // run_command implements the run command operation.
@@ -2684,10 +2703,16 @@ func run_command(directory string, overrides map[string]string, name string, arg
 	for _, item := range os.Environ() {
 		key, value, ok := strings.Cut(item, "=")
 		if ok {
+			if runtime.GOOS == "windows" {
+				key = strings.ToUpper(key)
+			}
 			env[key] = value
 		}
 	}
 	for key, value := range overrides {
+		if runtime.GOOS == "windows" {
+			key = strings.ToUpper(key)
+		}
 		env[key] = value
 	}
 	command.Env = make([]string, 0, len(env))
@@ -2918,11 +2943,10 @@ func dotnet_artifact(p layout) (artifact, error) {
 	if err := json.Unmarshal(metadata["releases"], &releases); err != nil {
 		return artifact{}, fmt.Errorf("parse .NET release list: %w", err)
 	}
-	rid_arch := "x64"
-	if runtime.GOARCH == "arm64" {
-		rid_arch = "arm64"
+	rid, err := dotnet_runtime_id(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return artifact{}, err
 	}
-	rid := runtime.GOOS + "-" + rid_arch
 	for _, release := range releases {
 		var sdks []map[string]json.RawMessage
 		if err := json.Unmarshal(release["sdks"], &sdks); err != nil {
@@ -2949,17 +2973,47 @@ func dotnet_artifact(p layout) (artifact, error) {
 						return artifact{}, fmt.Errorf("parse .NET SDK file %s: %w", key, err)
 					}
 				}
-				if file_rid == rid && (file_name == "sdk" || strings.HasPrefix(file_name, "sdk-") || strings.HasPrefix(file_name, "dotnet-sdk-")) {
-					format := "tar.gz"
-					if strings.HasSuffix(file_url, ".zip") {
-						format = "zip"
-					}
-					return artifact{name: filepath.Base(file_url), url: file_url, sha256: strings.ToLower(file_hash), destination: filepath.Join(p.toolchain, "dotnet"), format: format}, nil
+				if file_rid != rid || (file_name != "sdk" && !strings.HasPrefix(file_name, "sdk-") && !strings.HasPrefix(file_name, "dotnet-sdk-")) {
+					continue
 				}
+				format := ""
+				switch {
+				case strings.HasSuffix(strings.ToLower(file_url), ".zip"):
+					format = "zip"
+				case strings.HasSuffix(strings.ToLower(file_url), ".tar.gz"):
+					format = "tar.gz"
+				}
+				if format == "" {
+					continue
+				}
+				return artifact{name: filepath.Base(file_url), url: file_url, sha256: strings.ToLower(file_hash), destination: filepath.Join(p.toolchain, "dotnet"), format: format}, nil
 			}
 		}
 	}
 	return artifact{}, fmt.Errorf(".NET SDK %s archive for %s was not found in official metadata", dotnet_version, rid)
+}
+
+// dotnet_runtime_id maps Go host identifiers to the runtime identifiers used by .NET release metadata.
+func dotnet_runtime_id(goos, goarch string) (string, error) {
+	architecture := ""
+	switch goarch {
+	case "amd64":
+		architecture = "x64"
+	case "arm64":
+		architecture = "arm64"
+	default:
+		return "", fmt.Errorf("unsupported .NET host architecture %s", goarch)
+	}
+	operating_system := ""
+	switch goos {
+	case "windows":
+		operating_system = "win"
+	case "linux":
+		operating_system = "linux"
+	default:
+		return "", fmt.Errorf("unsupported .NET host operating system %s", goos)
+	}
+	return operating_system + "-" + architecture, nil
 }
 
 // installed_artifact_digest implements the installed artifact digest operation.
@@ -3573,14 +3627,42 @@ func safe_archive_path(name string, strip int) (string, bool, error) {
 func replace_directory(staged, destination string) error {
 	old := destination + ".previous"
 	_ = os.RemoveAll(old)
+	had_previous := false
 	if _, err := os.Stat(destination); err == nil {
-		if err := os.Rename(destination, old); err != nil {
+		if err := rename_directory_with_retry(destination, old); err != nil {
 			return err
 		}
+		had_previous = true
 	}
-	if err := os.Rename(staged, destination); err != nil {
-		_ = os.Rename(old, destination)
+	if err := rename_directory_with_retry(staged, destination); err != nil {
+		if had_previous {
+			_ = rename_directory_with_retry(old, destination)
+		}
 		return err
 	}
 	return os.RemoveAll(old)
+}
+
+// rename_directory_with_retry retries Windows directory moves that antivirus scanners or indexers temporarily block.
+func rename_directory_with_retry(source, destination string) error {
+	const attempts = 12
+	delay := 250 * time.Millisecond
+	var last_error error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		last_error = os.Rename(source, destination)
+		if last_error == nil {
+			return nil
+		}
+		if runtime.GOOS != "windows" || attempt == attempts {
+			return last_error
+		}
+		fmt.Printf("Windows temporarily blocked directory activation; retry %d/%d in %s: %v\n",
+			attempt, attempts-1, delay, last_error)
+		time.Sleep(delay)
+		delay *= 2
+		if delay > 8*time.Second {
+			delay = 8 * time.Second
+		}
+	}
+	return last_error
 }
